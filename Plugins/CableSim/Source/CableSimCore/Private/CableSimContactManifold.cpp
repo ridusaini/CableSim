@@ -133,7 +133,9 @@ namespace CableSim
 			const FVector3d Closest = ClosestPointOnSegment(NodePosition, Edge.Start, Edge.End);
 			const FVector3d Radial = NodePosition - Closest;
 			const double Distance = Radial.Length();
-			if (Distance > GatherDistance || Distance <= 1.e-6)
+			const FVector3d PreviousClosest = ClosestPointOnSegment(NodePreviousPosition, Edge.Start, Edge.End);
+			const double SweptDistance = FMath::Min(Distance, FVector3d::Distance(NodePreviousPosition, PreviousClosest));
+			if (SweptDistance > GatherDistance || Distance <= 1.e-6)
 			{
 				continue;
 			}
@@ -193,7 +195,19 @@ namespace CableSim
 				Triangle.Vertices[1],
 				Triangle.Vertices[2]);
 			const double Distance = FVector3d::Distance(NodePosition, ClosestPoint);
-			if (Distance > GatherDistance)
+			const FVector3d PreviousClosestPoint = ClosestPointOnTriangle(
+				NodePreviousPosition,
+				Triangle.Vertices[0],
+				Triangle.Vertices[1],
+				Triangle.Vertices[2]);
+			const double SweptDistance = FMath::Min(
+				Distance, FVector3d::Distance(NodePreviousPosition, PreviousClosestPoint));
+			if (SweptDistance > GatherDistance)
+			{
+				continue;
+			}
+			const double PlaneOffset = FVector3d::DotProduct(Triangle.Vertices[0], Normal);
+			if (FVector3d::DotProduct(NodePreviousPosition, Normal) - PlaneOffset < -Radius)
 			{
 				continue;
 			}
@@ -211,7 +225,6 @@ namespace CableSim
 				continue;
 			}
 
-			const double PlaneOffset = FVector3d::DotProduct(Triangle.Vertices[0], Normal);
 			bool bMerged = false;
 			for (FCandidate& Candidate : Candidates)
 			{

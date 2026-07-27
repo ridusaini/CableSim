@@ -1013,6 +1013,43 @@ bool FCableSimDrapeOverEdgeTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimBackFacePruneTest,
+	"CableSim.Core.Manifold.BackFacePruned",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimBackFacePruneTest::RunTest(const FString& Parameters)
+{
+	auto MakeTri = [](const int32 Index, const FVector3d& V0, const FVector3d& V1, const FVector3d& V2)
+	{
+		CableSim::FCollisionTriangle Triangle;
+		Triangle.Id = {1, 0, CableSim::ECollisionFeatureType::Triangle, Index, INDEX_NONE};
+		Triangle.GeometryType = CableSim::ECollisionGeometryType::TriangleMesh;
+		Triangle.bStaticObject = true;
+		Triangle.Vertices[0] = V0;
+		Triangle.Vertices[1] = V1;
+		Triangle.Vertices[2] = V2;
+		return Triangle;
+	};
+	TArray<CableSim::FCollisionTriangle> Triangles;
+	Triangles.Add(MakeTri(0, FVector3d(-10, -10, 0), FVector3d(10, -10, 0), FVector3d(0, 10, 0)));
+	Triangles.Add(MakeTri(1, FVector3d(-10, -10, -2.5), FVector3d(0, 10, -2.5), FVector3d(10, -10, -2.5)));
+
+	const FVector3d NodePosition(0.0, 0.0, 3.0);
+	CableSim::FManifoldConfig ManifoldConfig;
+	TArray<CableSim::FContactConstraint> Contacts;
+	CableSim::FContactManifoldCompiler::CompileNodeContacts(
+		0, NodePosition, NodePosition, Triangles, {}, ManifoldConfig, Contacts);
+
+	TestEqual(TEXT("Only the front-facing plane survives"), Contacts.Num(), 1);
+	if (Contacts.Num() == 1)
+	{
+		TestTrue(TEXT("Surviving plane faces the node (+Z)"),
+			FVector3d::DotProduct(Contacts[0].Normal, FVector3d::UnitZ()) > 0.99);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautRestBuzzTest,
 	"CableSim.Core.Resting.NearlyTautOnPlane",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
