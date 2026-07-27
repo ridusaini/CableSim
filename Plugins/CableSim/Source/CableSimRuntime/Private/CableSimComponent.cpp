@@ -1,7 +1,7 @@
 #include "CableSimComponent.h"
 
+#include "CableSimContactManifold.h"
 #include "CableSimEndpointResolver.h"
-#include "CableSimWorldCollisionAdapter.h"
 #include "Chaos/CableSimChaosCollisionAdapter.h"
 #include "DebugRenderSceneProxy.h"
 #include "Engine/World.h"
@@ -175,7 +175,7 @@ struct FCableSimRuntimeState
 	CableSim::FTautConfig AppliedTautConfig;
 	FCableSimChaosObjectTracker ChaosObjectTracker;
 	FCableSimChaosSnapshot ChaosSnapshot;
-	FCableSimContactCache ContactCache;
+	bool bSnapshotValid = false;
 	TArray<CableSim::FCollisionEdge> SupportedTautEdges;
 	FCableSimTautDiagnostics TautDiagnostics;
 	FCableSimEndpointConstraint EndpointConstraints[2];
@@ -291,7 +291,6 @@ void UCableSimComponent::ReinitializeSimulation()
 	RuntimeState->TautSolver.Reset();
 	RuntimeState->ChaosObjectTracker.Reset();
 	RuntimeState->ChaosSnapshot.Reset();
-	RuntimeState->ContactCache.Reset();
 	RuntimeState->SupportedTautEdges.Reset();
 	RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
 	RuntimeState->bTautWasEnabled = TautSettings.bEnableTautSolver;
@@ -394,7 +393,6 @@ void UCableSimComponent::SetEndpointMode(
 	}
 	Binding.Mode = Mode;
 	RuntimeState->AppliedEndpointModes[EndpointIndex] = Mode;
-	RuntimeState->ContactCache.Reset();
 }
 
 void UCableSimComponent::SetEndpointWorldTarget(
@@ -429,7 +427,6 @@ void UCableSimComponent::AttachEndpointToComponent(
 	Binding.SocketName = SocketName;
 	Binding.ComponentLocalOffset = LocalOffset;
 	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
-	RuntimeState->ContactCache.Reset();
 }
 
 void UCableSimComponent::ReleaseEndpoint(
@@ -474,7 +471,6 @@ void UCableSimComponent::TeleportEndpoint(
 		Binding.WorldTarget = WorldPosition;
 	}
 	RuntimeState->EndpointResolver.Reset();
-	RuntimeState->ContactCache.Reset();
 	RuntimeState->TautSolver.Reset();
 	SampleEndpointTargets(0.0);
 }
@@ -522,9 +518,9 @@ FCableSimStatus UCableSimComponent::GetSimulationStatus() const
 	Status.StepIndex = static_cast<int64>(Result.StepIndex);
 	Status.ParticleCount = Result.ParticleCount;
 	Status.ContactCount = Result.ContactCount;
-	Status.PersistedContactCount = RuntimeState->ContactCache.Contacts.Num();
-	Status.ContactAdditionCount = RuntimeState->ContactCache.AdditionCount;
-	Status.ContactRemovalCount = RuntimeState->ContactCache.RemovalCount;
+	Status.PersistedContactCount = Result.ContactCount;
+	Status.ContactAdditionCount = RuntimeState->ChaosSnapshot.Diagnostics.TriangleCount;
+	Status.ContactRemovalCount = 0;
 	Status.GuideConstraintCount = Result.GuideConstraintCount;
 	Status.ProjectedContactCount = Result.ProjectedContactCount;
 	Status.StaticFrictionAnchorCount = Result.StaticFrictionAnchorCount;
@@ -653,13 +649,11 @@ void UCableSimComponent::SynchronizeConfiguration()
 	{
 		RuntimeState->PendingConfig = CurrentConfig;
 		RuntimeState->bConfigPending = true;
-		RuntimeState->ContactCache.Reset();
 	}
 	const uint32 CollisionSignature = GetCollisionSignature(CollisionSettings);
 	if (CollisionSignature != RuntimeState->AppliedCollisionSignature)
 	{
 		RuntimeState->AppliedCollisionSignature = CollisionSignature;
-		RuntimeState->ContactCache.Reset();
 	}
 }
 
@@ -677,7 +671,6 @@ void UCableSimComponent::SynchronizeEndpointModes()
 		if (Mode != RuntimeState->AppliedEndpointModes[EndpointIndex])
 		{
 			RuntimeState->AppliedEndpointModes[EndpointIndex] = Mode;
-			RuntimeState->ContactCache.Reset();
 			RuntimeState->EndpointResolver.Reset();
 		}
 	}
@@ -732,6 +725,43 @@ void UCableSimComponent::CommitEndpointSamples()
 	RuntimeState->EndpointSampleElapsedTime = 0.0;
 }
 
+void UCableSimComponent::GatherCollisionSnapshot(
+	const CableSim::FStepInput& Input,
+	const TConstArrayView<AActor*> IgnoredActors)
+{
+	RuntimeState->bSnapshotValid = false;
+	if (!CollisionSettings.bEnableWorldCollision && !TautSettings.bEnableTautSolver)
+	{
+		RuntimeState->ChaosSnapshot.Reset();
+		return;
+	}
+	const double Tolerance = FMath::Max(TautSettings.TopologyTolerance, 0.001);
+	RuntimeState->bSnapshotValid = FCableSimChaosCollisionAdapter::GatherSnapshot(
+		GetWorld(),
+		GetOwner(),
+		IgnoredActors,
+		CollisionSettings,
+		Tolerance,
+		Solver.GetParticles(),
+		Input.StartEndpoint.TargetPosition,
+		Input.EndEndpoint.TargetPosition,
+		RuntimeState->ChaosObjectTracker,
+		RuntimeState->ChaosSnapshot);
+}
+
+CableSim::FManifoldConfig UCableSimComponent::BuildManifoldConfig() const
+{
+	CableSim::FManifoldConfig Config;
+	Config.NodeRadius = FMath::Max(CollisionSettings.Radius, 0.0);
+	Config.ActiveBand = FMath::Max(CollisionSettings.ContactReleaseDistance, CollisionSettings.SkinWidth);
+	Config.MergeNormalCosine = FMath::Cos(FMath::DegreesToRadians(
+		FMath::Clamp(CollisionSettings.ContactNormalToleranceDegrees, 0.0, 90.0)));
+	Config.MergeOffsetTolerance = FMath::Max(CollisionSettings.SkinWidth, 0.1);
+	Config.MaxPlanesPerNode = FMath::Clamp(CollisionSettings.MaximumContactsPerParticle, 1, 4);
+	Config.Tolerance = FMath::Max(TautSettings.TopologyTolerance, 0.001);
+	return Config;
+}
+
 void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 {
 	if (RuntimeState->bConfigPending)
@@ -755,25 +785,37 @@ void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 	RuntimeState->EndpointResolver.AppendResolvedActors(IgnoredActors);
 
 	CableSim::FStepInput Input = BuildStepInput(InterpolationAlpha);
-	PerformTautStep(Input, IgnoredActors);
+	GatherCollisionSnapshot(Input, IgnoredActors);
+	PerformTautStep(Input);
 	StartEndpointConstraint = RuntimeState->EndpointConstraints[0];
 	EndEndpointConstraint = RuntimeState->EndpointConstraints[1];
-	RuntimeState->ContactCache.BeginStep();
-	Solver.AdvanceStep(Input, [this, &IgnoredActors](
+
+	const CableSim::FManifoldConfig ManifoldConfig = BuildManifoldConfig();
+	const bool bCollide = CollisionSettings.bEnableWorldCollision && RuntimeState->bSnapshotValid;
+	Solver.AdvanceStep(Input, [this, bCollide, ManifoldConfig](
 		const TConstArrayView<CableSim::FParticle> Particles,
 		TArray<CableSim::FContactConstraint>& OutContacts)
 	{
-		FCableSimWorldCollisionAdapter::GatherContacts(
-			GetWorld(),
-			GetOwner(),
-			IgnoredActors,
-			CollisionSettings,
-			FrictionSettings,
-			Particles,
-			RuntimeState->ContactCache,
-			OutContacts);
+		if (!bCollide)
+		{
+			return;
+		}
+		const TArray<CableSim::FCollisionTriangle>& Triangles = RuntimeState->ChaosSnapshot.Triangles;
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				continue;
+			}
+			CableSim::FContactManifoldCompiler::CompileNodeContacts(
+				Index,
+				Particles[Index].Position,
+				Particles[Index].PreviousPosition,
+				Triangles,
+				ManifoldConfig,
+				OutContacts);
+		}
 	});
-	RuntimeState->ContactCache.EndStep(CollisionSettings.ContactPersistenceSteps);
 	RuntimeState->PreviousSolvedPositions = MoveTemp(RuntimeState->CurrentSolvedPositions);
 	RuntimeState->CurrentSolvedPositions.Reset(Solver.GetParticles().Num());
 	for (const CableSim::FParticle& Particle : Solver.GetParticles())
@@ -786,9 +828,7 @@ void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 	}
 }
 
-void UCableSimComponent::PerformTautStep(
-	CableSim::FStepInput& Input,
-	const TConstArrayView<AActor*> IgnoredActors)
+void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 {
 	if (!TautSettings.bEnableTautSolver)
 	{
@@ -892,17 +932,7 @@ void UCableSimComponent::PerformTautStep(
 	RuntimeState->bTautWasEnabled = true;
 
 	FCableSimTautDiagnostics Diagnostics;
-	const bool bSnapshotSucceeded = FCableSimChaosCollisionAdapter::GatherSnapshot(
-		GetWorld(),
-		GetOwner(),
-		IgnoredActors,
-		CollisionSettings,
-		TautConfig.TopologyTolerance,
-		Solver.GetParticles(),
-		Input.StartEndpoint.TargetPosition,
-		Input.EndEndpoint.TargetPosition,
-		RuntimeState->ChaosObjectTracker,
-		RuntimeState->ChaosSnapshot);
+	const bool bSnapshotSucceeded = RuntimeState->bSnapshotValid;
 	const FCableSimChaosSnapshotDiagnostics& SnapshotDiagnostics = RuntimeState->ChaosSnapshot.Diagnostics;
 	Diagnostics.bSnapshotSucceeded = bSnapshotSucceeded;
 	Diagnostics.bFeatureBudgetExceeded = SnapshotDiagnostics.bFeatureBudgetExceeded;

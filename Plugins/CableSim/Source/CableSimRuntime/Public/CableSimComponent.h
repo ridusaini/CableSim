@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CableSimContactManifold.h"
 #include "CableSimSolver.h"
 #include "CableSimTautSolver.h"
 #include "Debug/DebugDrawComponent.h"
@@ -570,7 +571,9 @@ private:
 	CableSim::FStepInput BuildStepInput(double InterpolationAlpha) const;
 	void CommitEndpointSamples();
 	void PerformFixedStep(double InterpolationAlpha);
-	void PerformTautStep(CableSim::FStepInput& Input, TConstArrayView<AActor*> IgnoredActors);
+	void GatherCollisionSnapshot(const CableSim::FStepInput& Input, TConstArrayView<AActor*> IgnoredActors);
+	CableSim::FManifoldConfig BuildManifoldConfig() const;
+	void PerformTautStep(CableSim::FStepInput& Input);
 	void BuildTautGuideConstraints(CableSim::FStepInput& Input) const;
 	void RefreshEditorPreview();
 	void RefreshVisualization();
