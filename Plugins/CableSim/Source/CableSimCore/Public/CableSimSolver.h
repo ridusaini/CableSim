@@ -55,10 +55,11 @@ namespace CableSim
 		double StaticFrictionCoefficient = 0.35;
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
-		// Multiplies the static-friction budget for particles gripping a convex edge,
-		// so a resting cable holds an edge (needs effective mu >= tan(edge angle))
-		// instead of sliding off. Fast motion still slides (dynamic friction).
-		double EdgeFrictionScale = 4.0;
+		// Optional extra static-friction grip for particles resting on a convex edge.
+		// Keep near 1: a large value makes static friction grab a *sliding* node
+		// (stick-slip / bounce). The smooth edge constraint + tension normally hold
+		// without a boost; raise only if slack cables slide off shallow edges.
+		double EdgeFrictionScale = 1.0;
 		// A contact within this normal distance of its plane counts as a supporting
 		// contact for friction and normal-velocity stabilization, even when it is not
 		// positively penetrating this iteration. Prevents resting touch/separate chatter.

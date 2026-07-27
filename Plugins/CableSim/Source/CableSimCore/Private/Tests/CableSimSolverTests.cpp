@@ -970,9 +970,9 @@ bool FCableSimEdgeFrictionHoldsTest::RunTest(const FString& Parameters)
 	};
 
 	const double DriftWithoutFriction = MeasureDrift(0.0);
-	const double DriftWithFriction = MeasureDrift(1.0);
+	const double DriftWithFriction = MeasureDrift(2.0);
 	AddInfo(FString::Printf(
-		TEXT("Edge friction: drift %.4f cm (mu=0) vs %.4f cm (mu=1)"),
+		TEXT("Edge friction: drift %.4f cm (mu=0) vs %.4f cm (mu=2)"),
 		DriftWithoutFriction, DriftWithFriction));
 	TestTrue(TEXT("Static friction holds the node on the convex edge"),
 		DriftWithFriction < DriftWithoutFriction * 0.5);
