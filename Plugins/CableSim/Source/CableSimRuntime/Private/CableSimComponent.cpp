@@ -801,6 +801,7 @@ void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 			return;
 		}
 		const TArray<CableSim::FCollisionTriangle>& Triangles = RuntimeState->ChaosSnapshot.Triangles;
+		const TArray<CableSim::FCollisionEdge>& Edges = RuntimeState->ChaosSnapshot.Edges;
 		for (int32 Index = 0; Index < Particles.Num(); ++Index)
 		{
 			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
@@ -812,6 +813,7 @@ void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 				Particles[Index].Position,
 				Particles[Index].PreviousPosition,
 				Triangles,
+				Edges,
 				ManifoldConfig,
 				OutContacts);
 		}

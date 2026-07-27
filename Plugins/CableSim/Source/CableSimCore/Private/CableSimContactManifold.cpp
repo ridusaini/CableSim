@@ -65,11 +65,28 @@ namespace CableSim
 		return A + AB * V + AC * W;
 	}
 
+	FVector3d FContactManifoldCompiler::ClosestPointOnSegment(
+		const FVector3d& Point,
+		const FVector3d& Start,
+		const FVector3d& End)
+	{
+		const FVector3d Direction = End - Start;
+		const double LengthSquared = Direction.SizeSquared();
+		if (LengthSquared <= 1.e-12)
+		{
+			return Start;
+		}
+		const double T = FMath::Clamp(
+			FVector3d::DotProduct(Point - Start, Direction) / LengthSquared, 0.0, 1.0);
+		return Start + Direction * T;
+	}
+
 	void FContactManifoldCompiler::CompileNodeContacts(
 		const int32 ParticleIndex,
 		const FVector3d& NodePosition,
 		const FVector3d& NodePreviousPosition,
 		const TConstArrayView<FCollisionTriangle> Triangles,
+		const TConstArrayView<FCollisionEdge> Edges,
 		const FManifoldConfig& Config,
 		TArray<FContactConstraint>& OutContacts)
 	{
@@ -78,16 +95,83 @@ namespace CableSim
 		const double MergeCosine = FMath::Clamp(Config.MergeNormalCosine, -1.0, 1.0);
 		const double MergeOffset = FMath::Max(Config.MergeOffsetTolerance, 0.0);
 
+		auto EmitContact = [ParticleIndex, &NodePreviousPosition, &OutContacts](
+			const FVector3d& Normal, const double MinimumNormalCoordinate, const FCollisionFeatureId& FeatureId)
+		{
+			FContactConstraint& Contact = OutContacts.AddDefaulted_GetRef();
+			Contact.FeatureId = PackContactFeatureId(FeatureId);
+			Contact.ParticleIndex = ParticleIndex;
+			Contact.Normal = Normal;
+			Contact.MinimumNormalCoordinate = MinimumNormalCoordinate;
+			Contact.FrictionAnchorPosition = NodePreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		};
+
+		// Convex edges: when the node sits in an edge's exterior wedge (radial
+		// direction between both outward face normals), one radial contact replaces
+		// the two face planes so they can't fight. The faces those edges cover are
+		// recorded so the plane pass below skips them.
+		struct FEdgeCandidate
+		{
+			FVector3d Normal;
+			double PlaneOffset = 0.0;
+			double Distance = 0.0;
+			FCollisionFeatureId FeatureId;
+		};
+		TArray<FEdgeCandidate, TInlineAllocator<8>> EdgeCandidates;
+		TArray<FVector3d, TInlineAllocator<8>> SuppressedNormals;
+		for (const FCollisionEdge& Edge : Edges)
+		{
+			if (Edge.Kind != ECollisionEdgeKind::Convex || !Edge.IsFinite())
+			{
+				continue;
+			}
+			const FVector3d Normal0 = Edge.FaceNormal0.GetSafeNormal();
+			const FVector3d Normal1 = Edge.FaceNormal1.GetSafeNormal();
+			if (Normal0.IsNearlyZero() || Normal1.IsNearlyZero())
+			{
+				continue;
+			}
+			const FVector3d Closest = ClosestPointOnSegment(NodePosition, Edge.Start, Edge.End);
+			const FVector3d Radial = NodePosition - Closest;
+			const double Distance = Radial.Length();
+			if (Distance > GatherDistance || Distance <= 1.e-6)
+			{
+				continue;
+			}
+			const FVector3d RadialDirection = Radial / Distance;
+			if (FVector3d::DotProduct(RadialDirection, Normal0) <= 0.0
+				|| FVector3d::DotProduct(RadialDirection, Normal1) <= 0.0)
+			{
+				continue;
+			}
+			EdgeCandidates.Add({
+				RadialDirection,
+				FVector3d::DotProduct(Closest, RadialDirection),
+				Distance,
+				Edge.Id});
+			SuppressedNormals.Add(Normal0);
+			SuppressedNormals.Add(Normal1);
+		}
+		EdgeCandidates.Sort([](const FEdgeCandidate& First, const FEdgeCandidate& Second)
+		{
+			return First.Distance < Second.Distance;
+		});
+		const int32 EdgeCount = FMath::Min(EdgeCandidates.Num(), FMath::Max(Config.MaxEdgesPerNode, 0));
+		for (int32 Index = 0; Index < EdgeCount; ++Index)
+		{
+			const FEdgeCandidate& Edge = EdgeCandidates[Index];
+			EmitContact(Edge.Normal, Edge.PlaneOffset + Radius, Edge.FeatureId);
+		}
+
 		struct FCandidate
 		{
 			FVector3d Normal;
 			double PlaneOffset = 0.0;
 			double Distance = 0.0;
 			FCollisionFeatureId FeatureId;
-			bool bStatic = false;
 		};
 		TArray<FCandidate, TInlineAllocator<16>> Candidates;
-
 		for (const FCollisionTriangle& Triangle : Triangles)
 		{
 			if (!Triangle.IsFinite())
@@ -109,6 +193,19 @@ namespace CableSim
 			{
 				continue;
 			}
+			bool bSuppressed = false;
+			for (const FVector3d& Suppressed : SuppressedNormals)
+			{
+				if (FVector3d::DotProduct(Suppressed, Normal) >= MergeCosine)
+				{
+					bSuppressed = true;
+					break;
+				}
+			}
+			if (bSuppressed)
+			{
+				continue;
+			}
 
 			const double PlaneOffset = FVector3d::DotProduct(Triangle.Vertices[0], Normal);
 			bool bMerged = false;
@@ -119,11 +216,7 @@ namespace CableSim
 				{
 					if (Distance < Candidate.Distance)
 					{
-						Candidate.Normal = Normal;
-						Candidate.PlaneOffset = PlaneOffset;
-						Candidate.Distance = Distance;
-						Candidate.FeatureId = Triangle.Id;
-						Candidate.bStatic = Triangle.bStaticObject;
+						Candidate = {Normal, PlaneOffset, Distance, Triangle.Id};
 					}
 					bMerged = true;
 					break;
@@ -131,7 +224,7 @@ namespace CableSim
 			}
 			if (!bMerged)
 			{
-				Candidates.Add({Normal, PlaneOffset, Distance, Triangle.Id, Triangle.bStaticObject});
+				Candidates.Add({Normal, PlaneOffset, Distance, Triangle.Id});
 			}
 		}
 
@@ -139,18 +232,11 @@ namespace CableSim
 		{
 			return First.Distance < Second.Distance;
 		});
-
 		const int32 PlaneCount = FMath::Min(Candidates.Num(), FMath::Max(Config.MaxPlanesPerNode, 0));
 		for (int32 Index = 0; Index < PlaneCount; ++Index)
 		{
 			const FCandidate& Candidate = Candidates[Index];
-			FContactConstraint& Contact = OutContacts.AddDefaulted_GetRef();
-			Contact.FeatureId = PackContactFeatureId(Candidate.FeatureId);
-			Contact.ParticleIndex = ParticleIndex;
-			Contact.Normal = Candidate.Normal;
-			Contact.MinimumNormalCoordinate = Candidate.PlaneOffset + Radius;
-			Contact.FrictionAnchorPosition = NodePreviousPosition;
-			Contact.bHasFrictionAnchor = true;
+			EmitContact(Candidate.Normal, Candidate.PlaneOffset + Radius, Candidate.FeatureId);
 		}
 	}
 }

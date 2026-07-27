@@ -12,6 +12,7 @@ namespace CableSim
 		double MergeNormalCosine = 0.985;
 		double MergeOffsetTolerance = 1.0;
 		int32 MaxPlanesPerNode = 4;
+		int32 MaxEdgesPerNode = 3;
 		double Tolerance = 0.1;
 	};
 
@@ -22,16 +23,19 @@ namespace CableSim
 	class CABLESIMCORE_API FContactManifoldCompiler
 	{
 	public:
-		// Builds up to MaxPlanesPerNode merged plane contacts for one node from the
-		// nearby snapshot triangles. Coplanar faces (e.g. a box top) collapse to one
-		// plane; the nearest planes win when capped. Emitted contacts carry the source
-		// triangle's stable feature id and the node's previous position as the friction
-		// anchor.
+		// Builds a node's local contact manifold from the nearby snapshot geometry:
+		// up to MaxEdgesPerNode radial convex-edge contacts (when the node sits in an
+		// edge's exterior wedge) plus up to MaxPlanesPerNode merged face planes.
+		// Coplanar faces collapse to one plane; face planes coincident with an active
+		// edge's faces are suppressed so the edge and its faces never fight. Every
+		// contact carries a stable feature id and the node's previous position as the
+		// friction anchor.
 		static void CompileNodeContacts(
 			int32 ParticleIndex,
 			const FVector3d& NodePosition,
 			const FVector3d& NodePreviousPosition,
 			TConstArrayView<FCollisionTriangle> Triangles,
+			TConstArrayView<FCollisionEdge> Edges,
 			const FManifoldConfig& Config,
 			TArray<FContactConstraint>& OutContacts);
 
@@ -40,5 +44,10 @@ namespace CableSim
 			const FVector3d& A,
 			const FVector3d& B,
 			const FVector3d& C);
+
+		static FVector3d ClosestPointOnSegment(
+			const FVector3d& Point,
+			const FVector3d& Start,
+			const FVector3d& End);
 	};
 }
