@@ -649,6 +649,260 @@ bool FCableSimSmoothSlackSettlingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Resting-regression harness. Drives the solver with stable analytical contacts
+// to isolate core resting behavior from runtime sweep-adapter churn. Thresholds
+// are loose baselines to tighten as Phase 1/2 land.
+
+namespace CableSimTests
+{
+	CableSim::FSimulationConfig MakeSettleConfig(
+		const double RestLength = 400.0,
+		const double NodeSpacing = 10.0)
+	{
+		CableSim::FSimulationConfig Config;
+		Config.RestLength = RestLength;
+		Config.NodeSpacing = NodeSpacing;
+		Config.ParticleMass = 0.05;
+		Config.Gravity = FVector3d(0.0, 0.0, -980.665);
+		Config.VelocityDamping = 0.01;
+		Config.BendingStepStrength = 0.20;
+		Config.FreeBendAngleRadiansPerMeter = FMath::DegreesToRadians(90.0);
+		Config.DistanceOverRelaxation = 1.015;
+		Config.ConstraintIterations = 64;
+		Config.bEnableFriction = true;
+		Config.StaticFrictionCoefficient = 0.35;
+		Config.DynamicFrictionCoefficient = 0.25;
+		Config.StaticFrictionSpeedThreshold = 2.0;
+		return Config;
+	}
+
+	struct FSettleMetrics
+	{
+		double WindowAverageRmsSpeed = 0.0;
+		double WindowMaxSpeed = 0.0;
+	};
+
+	FSettleMetrics RunSettle(
+		CableSim::FSolver& Solver,
+		const CableSim::FStepInput& Input,
+		const int32 StepCount,
+		const int32 WindowSteps,
+		const CableSim::FContactGenerator& ContactGenerator)
+	{
+		double RmsSum = 0.0;
+		double MaxSpeed = 0.0;
+		const int32 WindowStart = FMath::Max(StepCount - WindowSteps, 0);
+		for (int32 Step = 0; Step < StepCount; ++Step)
+		{
+			const CableSim::FStepResult Result = Solver.AdvanceStep(Input, ContactGenerator);
+			if (Step >= WindowStart)
+			{
+				RmsSum += Result.RmsParticleSpeed;
+				MaxSpeed = FMath::Max(MaxSpeed, Result.MaximumParticleSpeed);
+			}
+		}
+		FSettleMetrics Metrics;
+		Metrics.WindowAverageRmsSpeed = RmsSum / static_cast<double>(FMath::Max(StepCount - WindowStart, 1));
+		Metrics.WindowMaxSpeed = MaxSpeed;
+		return Metrics;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimRestingHangingTest,
+	"CableSim.Core.Resting.HangingNoCollision",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimRestingHangingTest::RunTest(const FString& Parameters)
+{
+	// No contacts: isolates the base solver from collision.
+	const FVector3d Start(-100.0, 0.0, 0.0);
+	const FVector3d End(100.0, 0.0, 0.0);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Hanging solver initializes"),
+		Solver.Initialize(Start, End, CableSimTests::MakeSettleConfig()));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	const CableSimTests::FSettleMetrics Metrics =
+		CableSimTests::RunSettle(Solver, Input, 900, 120, CableSim::FContactGenerator{});
+	AddInfo(FString::Printf(
+		TEXT("R1 hanging: window-avg RMS %.4f cm/s, window-max %.4f cm/s"),
+		Metrics.WindowAverageRmsSpeed, Metrics.WindowMaxSpeed));
+	TestFalse(TEXT("Hanging cable does not suspend"), Solver.IsSuspended());
+	TestTrue(TEXT("Hanging cable settles (RMS < 1 cm/s)"),
+		Metrics.WindowAverageRmsSpeed < 1.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimRestingOnPlaneTest,
+	"CableSim.Core.Resting.OnPlane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimRestingOnPlaneTest::RunTest(const FString& Parameters)
+{
+	// R2: a slack cable draped so its middle rests on a horizontal ground plane.
+	const FVector3d Start(-150.0, 0.0, 20.0);
+	const FVector3d End(150.0, 0.0, 20.0);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("On-plane solver initializes"),
+		Solver.Initialize(Start, End, CableSimTests::MakeSettleConfig()));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	const CableSim::FContactGenerator GroundPlane =
+		[](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic
+				|| Particles[Index].Position.Z > 0.5)
+			{
+				continue;
+			}
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = static_cast<uint64>(Index);
+			Contact.ParticleIndex = Index;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = 0.0;
+			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		}
+	};
+	const CableSimTests::FSettleMetrics Metrics =
+		CableSimTests::RunSettle(Solver, Input, 900, 120, GroundPlane);
+	double LowestParticleZ = TNumericLimits<double>::Max();
+	for (const CableSim::FParticle& Particle : Solver.GetParticles())
+	{
+		LowestParticleZ = FMath::Min(LowestParticleZ, Particle.Position.Z);
+	}
+	AddInfo(FString::Printf(
+		TEXT("R2 on-plane: window-avg RMS %.4f cm/s, window-max %.4f cm/s, lowest Z %.4f cm"),
+		Metrics.WindowAverageRmsSpeed, Metrics.WindowMaxSpeed, LowestParticleZ));
+	TestFalse(TEXT("On-plane cable does not suspend"), Solver.IsSuspended());
+	TestTrue(TEXT("On-plane cable does not sink through the plane"), LowestParticleZ > -0.5);
+	TestTrue(TEXT("On-plane cable settles (RMS < 2 cm/s)"),
+		Metrics.WindowAverageRmsSpeed < 2.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimRestingOverEdgeTest,
+	"CableSim.Core.Resting.OverConvexEdge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimRestingOverEdgeTest::RunTest(const FString& Parameters)
+{
+	// Cable draped over a convex ridge (two inclined planes meeting at an apex
+	// along Y): a tangential gravity component exists, so friction must hold it.
+	const FVector3d Start(-150.0, 0.0, 120.0);
+	const FVector3d End(150.0, 0.0, 120.0);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Over-edge solver initializes"),
+		Solver.Initialize(Start, End, CableSimTests::MakeSettleConfig()));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	const FVector3d LeftNormal = FVector3d(-1.0, 0.0, 1.0).GetSafeNormal();
+	const FVector3d RightNormal = FVector3d(1.0, 0.0, 1.0).GetSafeNormal();
+	const CableSim::FContactGenerator Ridge =
+		[LeftNormal, RightNormal](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		auto EmitIfNear = [&Contacts, &Particles](
+			const int32 Index, const FVector3d& Normal, const uint64 FeatureId)
+		{
+			if (FVector3d::DotProduct(Particles[Index].Position, Normal) > 0.5)
+			{
+				return;
+			}
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = FeatureId;
+			Contact.ParticleIndex = Index;
+			Contact.Normal = Normal;
+			Contact.MinimumNormalCoordinate = 0.0;
+			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		};
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				continue;
+			}
+			EmitIfNear(Index, LeftNormal, static_cast<uint64>(Index) << 1);
+			EmitIfNear(Index, RightNormal, (static_cast<uint64>(Index) << 1) | 1);
+		}
+	};
+	const CableSimTests::FSettleMetrics Metrics =
+		CableSimTests::RunSettle(Solver, Input, 900, 120, Ridge);
+	AddInfo(FString::Printf(
+		TEXT("R3 over-edge: window-avg RMS %.4f cm/s, window-max %.4f cm/s"),
+		Metrics.WindowAverageRmsSpeed, Metrics.WindowMaxSpeed));
+	TestFalse(TEXT("Over-edge cable does not suspend"), Solver.IsSuspended());
+	TestTrue(TEXT("Over-edge cable settles (RMS < 3 cm/s)"),
+		Metrics.WindowAverageRmsSpeed < 3.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimStaticFrictionSlopeTest,
+	"CableSim.Core.Friction.StaticHoldsOnSlope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimStaticFrictionSlopeTest::RunTest(const FString& Parameters)
+{
+	// The dynamic node rests on a horizontal plane (+Z) and hangs from a kinematic
+	// anchor placed straight up the normal, so the segment gives negligible restoring
+	// for small tangential motion. A horizontal gravity component pulls the node
+	// along the plane; with tan(angle) below the friction coefficient it must be held
+	// statically. Anchor-along-normal is what gives the node a genuine tangential DOF
+	// (unlike a taut span, where distance constraints pin it regardless of friction).
+	auto MeasureDrift = [](const double StaticFrictionCoefficient)
+	{
+		CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(20.0, 20.0);
+		Config.ConstraintIterations = 16;
+		Config.DistanceOverRelaxation = 1.0;
+		Config.Gravity = FVector3d(300.0, 0.0, -980.665);
+		Config.StaticFrictionCoefficient = StaticFrictionCoefficient;
+		const FVector3d Anchor(0.0, 0.0, 20.0);
+		const FVector3d NodeStart(0.0, 0.0, 0.0);
+		CableSim::FSolver Solver;
+		Solver.Initialize(Anchor, NodeStart, Config);
+		CableSim::FStepInput Input = CableSimTests::MakeFreeInput();
+		Input.StartEndpoint.Mode = CableSim::EParticleMode::Kinematic;
+		Input.StartEndpoint.TargetPosition = Anchor;
+		Input.EndEndpoint.Mode = CableSim::EParticleMode::Dynamic;
+		const CableSim::FContactGenerator Ground =
+			[](const TConstArrayView<CableSim::FParticle> Particles,
+				TArray<CableSim::FContactConstraint>& Contacts)
+		{
+			const int32 Index = Particles.Num() - 1;
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				return;
+			}
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = 1;
+			Contact.ParticleIndex = Index;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = 0.0;
+			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		};
+		for (int32 Step = 0; Step < 300; ++Step)
+		{
+			Solver.AdvanceStep(Input, Ground);
+		}
+		return FMath::Abs(Solver.GetParticles().Last().Position.X);
+	};
+
+	const double DriftWithoutFriction = MeasureDrift(0.0);
+	const double DriftWithFriction = MeasureDrift(1.0);
+	AddInfo(FString::Printf(
+		TEXT("Slope friction: tangential drift %.4f cm (mu=0) vs %.4f cm (mu=1)"),
+		DriftWithoutFriction, DriftWithFriction));
+	TestTrue(TEXT("Static friction meaningfully reduces tangential creep"),
+		DriftWithFriction < DriftWithoutFriction * 0.5);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimNodeCountBenchmarkTest,
 	"CableSim.Core.Performance.NodeCountScaling",

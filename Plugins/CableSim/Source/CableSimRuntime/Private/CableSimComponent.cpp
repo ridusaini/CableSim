@@ -600,6 +600,7 @@ CableSim::FSimulationConfig UCableSimComponent::BuildCoreConfig() const
 	Config.StaticFrictionCoefficient = FMath::Max(FrictionSettings.StaticFrictionCoefficient, 0.0);
 	Config.DynamicFrictionCoefficient = FMath::Max(FrictionSettings.DynamicFrictionCoefficient, 0.0);
 	Config.StaticFrictionSpeedThreshold = FMath::Max(FrictionSettings.StaticSpeedThreshold, 0.0);
+	Config.ContactActiveBand = FMath::Max(CollisionSettings.ContactReleaseDistance, CollisionSettings.SkinWidth);
 	return Config;
 }
 

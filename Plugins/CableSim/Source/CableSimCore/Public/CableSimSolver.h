@@ -55,6 +55,10 @@ namespace CableSim
 		double StaticFrictionCoefficient = 0.35;
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
+		// A contact within this normal distance of its plane counts as a supporting
+		// contact for friction and normal-velocity stabilization, even when it is not
+		// positively penetrating this iteration. Prevents resting touch/separate chatter.
+		double ContactActiveBand = 1.0;
 
 		bool Equals(const FSimulationConfig& Other, double Tolerance = 1.e-9) const;
 	};
@@ -221,6 +225,7 @@ namespace CableSim
 		FReplayFrame LastReplayFrame;
 		TArray<FContactDiagnostic> LastContactDiagnostics;
 		TArray<bool> ProjectedContacts;
+		TArray<bool> ActiveContacts;
 		TArray<double> ContactNormalCorrections;
 		TArray<double> ParticleStaticFrictionCorrections;
 		TArray<double> ParticleDynamicFrictionVelocityChanges;

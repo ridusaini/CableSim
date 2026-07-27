@@ -45,7 +45,8 @@ namespace CableSim
 			&& bEnableFriction == Other.bEnableFriction
 			&& FMath::IsNearlyEqual(StaticFrictionCoefficient, Other.StaticFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(DynamicFrictionCoefficient, Other.DynamicFrictionCoefficient, Tolerance)
-			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance);
+			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance)
+			&& FMath::IsNearlyEqual(ContactActiveBand, Other.ContactActiveBand, Tolerance);
 	}
 
 	bool FSolver::Initialize(
@@ -99,6 +100,7 @@ namespace CableSim
 		LastReplayFrame = FReplayFrame{};
 		LastContactDiagnostics.Reset();
 		ProjectedContacts.Reset();
+		ActiveContacts.Reset();
 		ContactNormalCorrections.Reset();
 		ParticleStaticFrictionCorrections.Reset();
 		ParticleDynamicFrictionVelocityChanges.Reset();
@@ -215,6 +217,7 @@ namespace CableSim
 		}
 
 		ProjectedContacts.Init(false, Contacts.Num());
+		ActiveContacts.Init(false, Contacts.Num());
 		ContactNormalCorrections.Init(0.0, Contacts.Num());
 		TArray<double> AccumulatedStaticCorrections;
 		AccumulatedStaticCorrections.Init(0.0, Particles.Num());
@@ -253,11 +256,19 @@ namespace CableSim
 			}
 			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 			{
-				const double Correction = ProjectContactConstraint(Contacts[ContactIndex]);
+				const FContactConstraint& Contact = Contacts[ContactIndex];
+				const double Correction = ProjectContactConstraint(Contact);
 				if (Correction > 0.0)
 				{
 					ProjectedContacts[ContactIndex] = true;
 					ContactNormalCorrections[ContactIndex] += Correction;
+				}
+				const double Separation = FVector3d::DotProduct(
+					Particles[Contact.ParticleIndex].Position, Contact.Normal)
+					- Contact.MinimumNormalCoordinate;
+				if (Separation <= Config.ContactActiveBand)
+				{
+					ActiveContacts[ContactIndex] = true;
 				}
 			}
 			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
@@ -284,6 +295,7 @@ namespace CableSim
 				RefreshedContactCount = RefreshedContacts.Num();
 				Contacts = MoveTemp(RefreshedContacts);
 				ProjectedContacts.Init(false, Contacts.Num());
+				ActiveContacts.Init(false, Contacts.Num());
 				ContactNormalCorrections.Init(0.0, Contacts.Num());
 			}
 		}
@@ -399,7 +411,8 @@ namespace CableSim
 			&& FMath::IsFinite(InConfig.DistanceOverRelaxation)
 			&& FMath::IsFinite(InConfig.StaticFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.DynamicFrictionCoefficient)
-			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold);
+			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold)
+			&& FMath::IsFinite(InConfig.ContactActiveBand);
 	}
 
 	FSimulationConfig FSolver::SanitizeConfig(const FSimulationConfig& InConfig)
@@ -416,6 +429,7 @@ namespace CableSim
 		Result.StaticFrictionCoefficient = FMath::Max(Result.StaticFrictionCoefficient, 0.0);
 		Result.DynamicFrictionCoefficient = FMath::Max(Result.DynamicFrictionCoefficient, 0.0);
 		Result.StaticFrictionSpeedThreshold = FMath::Max(Result.StaticFrictionSpeedThreshold, 0.0);
+		Result.ContactActiveBand = FMath::Max(Result.ContactActiveBand, 0.0);
 		return Result;
 	}
 
@@ -609,8 +623,8 @@ namespace CableSim
 		{
 			const FContactConstraint& Contact = Contacts[ContactIndex];
 			if (Contact.ParticleIndex != ParticleIndex
-				|| !ProjectedContacts.IsValidIndex(ContactIndex)
-				|| !ProjectedContacts[ContactIndex])
+				|| !ActiveContacts.IsValidIndex(ContactIndex)
+				|| !ActiveContacts[ContactIndex])
 			{
 				continue;
 			}
@@ -626,12 +640,13 @@ namespace CableSim
 			return;
 		}
 
+		// Static friction is positional (pull toward the step-start anchor, capped by
+		// the Coulomb budget) and must not be gated by instantaneous velocity: the
+		// per-step gravity impulse alone exceeds any reasonable speed threshold on a
+		// non-flat contact, which would defeat static hold. The budget cap yields the
+		// Static/Sliding split — a correction the budget can fully cover holds; beyond
+		// it the node slides and dynamic velocity friction takes over.
 		FParticle& Particle = Particles[ParticleIndex];
-		const FVector3d TangentialVelocity = RemoveNormalComponents(Particle.Velocity, Normals);
-		if (TangentialVelocity.Length() > Config.StaticFrictionSpeedThreshold)
-		{
-			return;
-		}
 		AverageAnchor /= static_cast<double>(AnchorCount);
 		const FVector3d TangentialOffset = RemoveNormalComponents(Particle.Position - AverageAnchor, Normals);
 		const double Distance = TangentialOffset.Length();
@@ -689,8 +704,8 @@ namespace CableSim
 			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 			{
 				if (Contacts[ContactIndex].ParticleIndex != ParticleIndex
-					|| !ProjectedContacts.IsValidIndex(ContactIndex)
-					|| !ProjectedContacts[ContactIndex])
+					|| !ActiveContacts.IsValidIndex(ContactIndex)
+					|| !ActiveContacts[ContactIndex])
 				{
 					continue;
 				}
@@ -734,16 +749,16 @@ namespace CableSim
 	void FSolver::UpdateContactLoads(const TArray<FContactConstraint>& Contacts)
 	{
 		const int32 ParticleCount = Particles.Num();
-		TArray<bool> HasProjectedContact;
-		HasProjectedContact.Init(false, ParticleCount);
+		TArray<bool> HasActiveContact;
+		HasActiveContact.Init(false, ParticleCount);
 		TArray<FVector3d> AverageNormals;
 		AverageNormals.Init(FVector3d::ZeroVector, ParticleCount);
 		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 		{
-			if (ProjectedContacts.IsValidIndex(ContactIndex) && ProjectedContacts[ContactIndex])
+			if (ActiveContacts.IsValidIndex(ContactIndex) && ActiveContacts[ContactIndex])
 			{
 				const int32 ParticleIndex = Contacts[ContactIndex].ParticleIndex;
-				HasProjectedContact[ParticleIndex] = true;
+				HasActiveContact[ParticleIndex] = true;
 				AverageNormals[ParticleIndex] += Contacts[ContactIndex].Normal;
 			}
 		}
@@ -757,7 +772,7 @@ namespace CableSim
 		for (int32 Index = 1; Index < ParticleCount; ++Index)
 		{
 			FromStart[Index] = FromStart[Index - 1] + ParticleWeight;
-			if (Index + 1 < ParticleCount && !HasProjectedContact[Index])
+			if (Index + 1 < ParticleCount && !HasActiveContact[Index])
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
@@ -771,7 +786,7 @@ namespace CableSim
 		for (int32 Index = ParticleCount - 2; Index >= 0; --Index)
 		{
 			FromEnd[Index] = FromEnd[Index + 1] + ParticleWeight;
-			if (Index > 0 && !HasProjectedContact[Index])
+			if (Index > 0 && !HasActiveContact[Index])
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
@@ -806,7 +821,7 @@ namespace CableSim
 		{
 			const double Tension = Particles[Index].EstimatedTension;
 			Particles[Index].EstimatedNormalLoad = 0.0;
-			if (!HasProjectedContact[Index])
+			if (!HasActiveContact[Index])
 			{
 				continue;
 			}
@@ -845,7 +860,8 @@ namespace CableSim
 				? ParticleDynamicFrictionVelocityChanges[Contact.ParticleIndex] : 0.0;
 			Diagnostic.EstimatedTension = Particles[Contact.ParticleIndex].EstimatedTension;
 			Diagnostic.EstimatedNormalLoad = Particles[Contact.ParticleIndex].EstimatedNormalLoad;
-			Diagnostic.bStaticAnchorHeld = Diagnostic.bProjected && Contact.bHasFrictionAnchor;
+			const bool bActive = ActiveContacts.IsValidIndex(ContactIndex) && ActiveContacts[ContactIndex];
+			Diagnostic.bStaticAnchorHeld = bActive && Contact.bHasFrictionAnchor;
 		}
 	}
 
