@@ -55,15 +55,9 @@ namespace CableSim
 		double StaticFrictionCoefficient = 0.35;
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
-		// Optional extra static-friction grip for particles resting on a convex edge.
-		// Keep near 1: a large value makes static friction grab a *sliding* node
-		// (stick-slip / bounce). The smooth edge constraint + tension normally hold
-		// without a boost; raise only if slack cables slide off shallow edges.
 		double EdgeFrictionScale = 1.0;
-		// A contact within this normal distance of its plane counts as a supporting
-		// contact for friction and normal-velocity stabilization, even when it is not
-		// positively penetrating this iteration. Prevents resting touch/separate chatter.
 		double ContactActiveBand = 1.0;
+		bool bRefreshContactsMidSolve = true;
 
 		bool Equals(const FSimulationConfig& Other, double Tolerance = 1.e-9) const;
 	};
@@ -84,12 +78,6 @@ namespace CableSim
 		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		FVector3d FrictionAnchorPosition = FVector3d::ZeroVector;
 		bool bHasFrictionAnchor = false;
-		// Rounded convex-edge contact. When set, the solver constrains the node to
-		// stay >= EdgeRadius from the segment [EdgeStart,EdgeEnd] while its radial
-		// direction lies in the exterior wedge between Normal (face 0) and
-		// SecondNormal (face 1) — recomputed each iteration so it curves smoothly.
-		// The cable grips an edge harder than a flat face (tension/capstan), so these
-		// also get a boosted static-friction budget.
 		bool bConvexEdge = false;
 		FVector3d EdgeStart = FVector3d::ZeroVector;
 		FVector3d EdgeEnd = FVector3d::ZeroVector;

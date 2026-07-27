@@ -289,7 +289,7 @@ namespace CableSim
 					Config.ConstraintIterations);
 				ProjectGuideConstraint(Guide, IterationStrength);
 			}
-			if (ContactGenerator && Config.ConstraintIterations > 1
+			if (ContactGenerator && Config.bRefreshContactsMidSolve && Config.ConstraintIterations > 1
 				&& Iteration + 1 == Config.ConstraintIterations / 2)
 			{
 				TArray<FContactConstraint> RefreshedContacts;
@@ -629,8 +629,6 @@ namespace CableSim
 			}
 			const FVector3d RadialDirection = Radial / Distance;
 			OutEffectiveNormal = RadialDirection;
-			// Acts only in the exterior wedge between the two faces; over a face a
-			// face plane handles the node. Recomputed each iteration so it curves.
 			const bool bInWedge = FVector3d::DotProduct(RadialDirection, Contact.Normal) > 0.0
 				&& FVector3d::DotProduct(RadialDirection, Contact.SecondNormal) > 0.0;
 			if (!bInWedge)
@@ -698,12 +696,6 @@ namespace CableSim
 			return;
 		}
 
-		// Static friction is positional (pull toward the step-start anchor, capped by
-		// the Coulomb budget) and must not be gated by instantaneous velocity: the
-		// per-step gravity impulse alone exceeds any reasonable speed threshold on a
-		// non-flat contact, which would defeat static hold. The budget cap yields the
-		// Static/Sliding split — a correction the budget can fully cover holds; beyond
-		// it the node slides and dynamic velocity friction takes over.
 		FParticle& Particle = Particles[ParticleIndex];
 		AverageAnchor /= static_cast<double>(AnchorCount);
 		const FVector3d TangentialOffset = RemoveNormalComponents(Particle.Position - AverageAnchor, Normals);
@@ -951,8 +943,6 @@ namespace CableSim
 			}
 			if (Contact.bConvexEdge)
 			{
-				// Edge contacts are a distance-to-line constraint, not a plane; the
-				// plane-reachability cull below does not apply.
 				continue;
 			}
 			bool bHasKinematicReference = false;

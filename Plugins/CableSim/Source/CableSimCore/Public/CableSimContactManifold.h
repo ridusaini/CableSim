@@ -16,20 +16,11 @@ namespace CableSim
 		double Tolerance = 0.1;
 	};
 
-	// Packs a stable collision feature id into the solver's uint64 contact id so a
-	// contact keeps its identity (and friction anchor) across steps.
 	CABLESIMCORE_API uint64 PackContactFeatureId(const FCollisionFeatureId& FeatureId);
 
 	class CABLESIMCORE_API FContactManifoldCompiler
 	{
 	public:
-		// Builds a node's local contact manifold from the nearby snapshot geometry:
-		// up to MaxEdgesPerNode radial convex-edge contacts (when the node sits in an
-		// edge's exterior wedge) plus up to MaxPlanesPerNode merged face planes.
-		// Coplanar faces collapse to one plane; face planes coincident with an active
-		// edge's faces are suppressed so the edge and its faces never fight. Every
-		// contact carries a stable feature id and the node's previous position as the
-		// friction anchor.
 		static void CompileNodeContacts(
 			int32 ParticleIndex,
 			const FVector3d& NodePosition,

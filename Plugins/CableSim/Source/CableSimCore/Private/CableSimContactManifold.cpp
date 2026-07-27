@@ -107,11 +107,6 @@ namespace CableSim
 			Contact.bHasFrictionAnchor = true;
 		};
 
-		// Convex edges: when the node sits in an edge's exterior wedge, emit a rounded
-		// edge contact carrying the segment + both face normals. The solver constrains
-		// the node to the edge cylinder each iteration (curved, no linearization) and
-		// deactivates it over a face. The covered faces are recorded so the plane pass
-		// skips them (the edge replaces them in the wedge).
 		struct FEdgeCandidate
 		{
 			FVector3d Start;
