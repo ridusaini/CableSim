@@ -1050,6 +1050,78 @@ bool FCableSimBackFacePruneTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimGuideCorridorTest,
+	"CableSim.Core.Coupling.GuideCorridorAbsorbsJitter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimGuideCorridorTest::RunTest(const FString& Parameters)
+{
+	const double RestHeight = 5.0;
+	const CableSim::FContactGenerator PlaneGenerator =
+		[RestHeight](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				continue;
+			}
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = 1;
+			Contact.ParticleIndex = Index;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = RestHeight;
+			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		}
+	};
+
+	auto MeasureJitterResponse = [&PlaneGenerator, RestHeight](const double Corridor)
+	{
+		CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(300.0, 10.0);
+		const FVector3d Start(-150.0, 0.0, RestHeight);
+		const FVector3d End(150.0, 0.0, RestHeight);
+		CableSim::FSolver Solver;
+		Solver.Initialize(Start, End, Config);
+		CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+		for (int32 Step = 0; Step < 200; ++Step)
+		{
+			Solver.AdvanceStep(Input, PlaneGenerator);
+		}
+		const int32 Middle = Solver.GetParticles().Num() / 2;
+		double RmsSum = 0.0;
+		for (int32 Step = 0; Step < 200; ++Step)
+		{
+			Input.GuideConstraints.Reset();
+			CableSim::FGuideConstraint& Guide = Input.GuideConstraints.AddDefaulted_GetRef();
+			Guide.ParticleIndex = Middle;
+			Guide.TargetPosition = FVector3d(
+				Solver.GetParticles()[Middle].Position.X,
+				(Step % 2 == 0) ? 0.5 : -0.5,
+				RestHeight);
+			Guide.MaximumDistance = Corridor;
+			Guide.StepStrength = 0.85;
+			const CableSim::FStepResult Result = Solver.AdvanceStep(Input, PlaneGenerator);
+			if (Step >= 100)
+			{
+				RmsSum += Result.RmsParticleSpeed;
+			}
+		}
+		return RmsSum / 100.0;
+	};
+
+	const double FlooredRms = MeasureJitterResponse(5.0);
+	const double PinnedRms = MeasureJitterResponse(0.0);
+	AddInfo(FString::Printf(
+		TEXT("Guide jitter response: floored corridor %.3f cm/s vs zero corridor %.3f cm/s"),
+		FlooredRms, PinnedRms));
+	TestTrue(TEXT("A floored corridor absorbs sample jitter (stays at rest)"), FlooredRms < 2.0);
+	TestTrue(TEXT("A zero corridor pins to the jittering sample and buzzes"), PinnedRms > 10.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautRestBuzzTest,
 	"CableSim.Core.Resting.NearlyTautOnPlane",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

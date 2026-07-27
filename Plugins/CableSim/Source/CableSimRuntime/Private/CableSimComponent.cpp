@@ -1091,7 +1091,9 @@ void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) 
 		CableSim::FGuideConstraint& Guide = Input.GuideConstraints.AddDefaulted_GetRef();
 		Guide.ParticleIndex = ParticleIndex;
 		Guide.TargetPosition = SamplePolyline(Points, Alpha);
-		Guide.MaximumDistance = BaseRadius * FMath::Sin(UE_PI * Alpha);
+		Guide.MaximumDistance = FMath::Max(
+			BaseRadius * FMath::Sin(UE_PI * Alpha),
+			FMath::Max(TautSettings.MinimumGuideRadius, 0.0));
 		Guide.StepStrength = FMath::Clamp(TautSettings.GuideStepStrength, 0.0, 1.0) * ActivationAlpha;
 	}
 }

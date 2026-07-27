@@ -220,6 +220,12 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
 	double MaximumGuideRadius = 100.0;
 
+	// A resting cable must be free to follow the surface, so the corridor never
+	// collapses below this radius: below it the leash exerts no pull, which keeps
+	// a near-taut cable from being pinned to a jittering geodesic sample.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
+	double MinimumGuideRadius = 5.0;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double GuideStepStrength = 0.85;
 
