@@ -162,6 +162,7 @@ namespace CableSim
 		{
 			const FEdgeCandidate& Edge = EdgeCandidates[Index];
 			EmitContact(Edge.Normal, Edge.PlaneOffset + Radius, Edge.FeatureId);
+			OutContacts.Last().bConvexEdge = true;
 		}
 
 		struct FCandidate

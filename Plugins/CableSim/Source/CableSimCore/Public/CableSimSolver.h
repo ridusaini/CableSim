@@ -55,6 +55,10 @@ namespace CableSim
 		double StaticFrictionCoefficient = 0.35;
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
+		// Multiplies the static-friction budget for particles gripping a convex edge,
+		// so a resting cable holds an edge (needs effective mu >= tan(edge angle))
+		// instead of sliding off. Fast motion still slides (dynamic friction).
+		double EdgeFrictionScale = 4.0;
 		// A contact within this normal distance of its plane counts as a supporting
 		// contact for friction and normal-velocity stabilization, even when it is not
 		// positively penetrating this iteration. Prevents resting touch/separate chatter.
@@ -79,6 +83,9 @@ namespace CableSim
 		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		FVector3d FrictionAnchorPosition = FVector3d::ZeroVector;
 		bool bHasFrictionAnchor = false;
+		// A rounded convex-edge contact. The cable grips an edge harder than a flat
+		// face (tension/capstan), so these get a boosted static-friction budget.
+		bool bConvexEdge = false;
 	};
 
 	struct CABLESIMCORE_API FGuideConstraint

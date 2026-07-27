@@ -46,6 +46,7 @@ namespace CableSim
 			&& FMath::IsNearlyEqual(StaticFrictionCoefficient, Other.StaticFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(DynamicFrictionCoefficient, Other.DynamicFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance)
+			&& FMath::IsNearlyEqual(EdgeFrictionScale, Other.EdgeFrictionScale, Tolerance)
 			&& FMath::IsNearlyEqual(ContactActiveBand, Other.ContactActiveBand, Tolerance);
 	}
 
@@ -412,6 +413,7 @@ namespace CableSim
 			&& FMath::IsFinite(InConfig.StaticFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.DynamicFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold)
+			&& FMath::IsFinite(InConfig.EdgeFrictionScale)
 			&& FMath::IsFinite(InConfig.ContactActiveBand);
 	}
 
@@ -429,6 +431,7 @@ namespace CableSim
 		Result.StaticFrictionCoefficient = FMath::Max(Result.StaticFrictionCoefficient, 0.0);
 		Result.DynamicFrictionCoefficient = FMath::Max(Result.DynamicFrictionCoefficient, 0.0);
 		Result.StaticFrictionSpeedThreshold = FMath::Max(Result.StaticFrictionSpeedThreshold, 0.0);
+		Result.EdgeFrictionScale = FMath::Max(Result.EdgeFrictionScale, 1.0);
 		Result.ContactActiveBand = FMath::Max(Result.ContactActiveBand, 0.0);
 		return Result;
 	}
@@ -619,6 +622,7 @@ namespace CableSim
 		TArray<FVector3d, TInlineAllocator<3>> Normals;
 		FVector3d AverageAnchor = FVector3d::ZeroVector;
 		int32 AnchorCount = 0;
+		bool bGripsEdge = false;
 		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 		{
 			const FContactConstraint& Contact = Contacts[ContactIndex];
@@ -629,6 +633,7 @@ namespace CableSim
 				continue;
 			}
 			AddOrthonormalNormal(Contact.Normal, Normals);
+			bGripsEdge |= Contact.bConvexEdge;
 			if (Contact.bHasFrictionAnchor)
 			{
 				AverageAnchor += Contact.FrictionAnchorPosition;
@@ -660,7 +665,8 @@ namespace CableSim
 		{
 			return;
 		}
-		const double StepBudget = Config.StaticFrictionCoefficient
+		const double EdgeScale = bGripsEdge ? FMath::Max(Config.EdgeFrictionScale, 1.0) : 1.0;
+		const double StepBudget = Config.StaticFrictionCoefficient * EdgeScale
 			* Particle.EstimatedNormalLoad / Mass * 100.0 * DeltaTime * DeltaTime;
 		const double RemainingBudget = FMath::Max(
 			StepBudget - AccumulatedStaticCorrections[ParticleIndex],

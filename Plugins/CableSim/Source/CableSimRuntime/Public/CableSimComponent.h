@@ -188,6 +188,10 @@ struct CABLESIMRUNTIME_API FCableSimFrictionSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm/s"))
 	double StaticSpeedThreshold = 2.0;
+
+	/** Static-friction grip multiplier for cable resting on a convex edge (>=1). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0"))
+	double EdgeFrictionScale = 4.0;
 };
 
 USTRUCT(BlueprintType)
