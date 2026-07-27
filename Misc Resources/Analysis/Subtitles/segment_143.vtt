@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:14:18.063 --> 00:14:19.693
+So, the rope has a resistance to bending.
+
+00:14:19.693 --> 00:14:22.093
+So, we would want to add
+some bending stiffness,
+
+00:14:23.523 --> 00:14:26.403
+or bending constraints to
+prevent these sharp angles.
+

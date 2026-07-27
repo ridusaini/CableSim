@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:24:18.115 --> 00:24:21.093
+We're on the one wavefront
+and process 64 nodes
+
+00:24:21.093 --> 00:24:23.993
+at the time, but it's not
+the same as doing 64 nodes,
+
+00:24:23.993 --> 00:24:25.693
+one after each other, serially.
+

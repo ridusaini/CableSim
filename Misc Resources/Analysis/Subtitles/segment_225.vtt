@@ -1,0 +1,13 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:22:31.453 --> 00:22:33.873
+So, what can we do to improve that?
+
+00:22:33.873 --> 00:22:36.383
+One common thing to do is over-relaxation.
+
+00:22:36.383 --> 00:22:39.373
+So basically, I'm iterating
+over each distance constraint.
+

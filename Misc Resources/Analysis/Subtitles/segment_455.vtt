@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:45:30.043 --> 00:45:32.923
+And now we only have A, C, D left.
+
+00:45:32.923 --> 00:45:35.683
+And we see that there is an Inner Corner,
+
+00:45:35.683 --> 00:45:38.723
+Stable Inner Corner between A-C and A-D.
+
+00:45:38.723 --> 00:45:40.265
+And if there is any Stable Inner Corner,
+

@@ -1,0 +1,4615 @@
+WEBVTT
+
+00:00:00.930 --> 00:00:04.680
+(energetic electronic music)
+
+00:00:07.813 --> 00:00:08.813
+- Hi, everybody.
+
+00:00:08.813 --> 00:00:12.403
+Welcome to my talk, which
+will be about rope simulation
+
+00:00:12.403 --> 00:00:14.003
+in Uncharted 4 and Last Of Us 2.
+
+00:00:14.913 --> 00:00:15.746
+My name is Jaroslav Sinecky.
+
+00:00:15.746 --> 00:00:17.823
+And I'm a programmer at Naughty Dog.
+
+00:00:19.143 --> 00:00:21.433
+So, this talk has three parts.
+
+00:00:21.433 --> 00:00:24.963
+The first is like, a general
+overview of our rope tech,
+
+00:00:24.963 --> 00:00:27.023
+how it came to be, what
+were the motivations
+
+00:00:27.023 --> 00:00:28.943
+and the features that we needed.
+
+00:00:28.943 --> 00:00:31.173
+And then we'll dive into the
+technical side of things.
+
+00:00:31.173 --> 00:00:33.673
+And the second part will be
+about a Dynamic Rope Simulation.
+
+00:00:33.673 --> 00:00:36.523
+And the third part about
+Taut Rope Simulation,
+
+00:00:36.523 --> 00:00:39.323
+which I'll explain in a little
+while, what that really is.
+
+00:00:40.273 --> 00:00:41.106
+So, the rope tech that
+you can see in Uncharted 4
+
+00:00:41.106 --> 00:00:45.963
+and Last Of Us 2, dates back to 2011.
+
+00:00:45.963 --> 00:00:47.953
+We just shipped Uncharted 3,
+
+00:00:47.953 --> 00:00:50.353
+and at Naughty Dog after we ship a game
+
+00:00:50.353 --> 00:00:52.903
+there is usually downtime
+of several months
+
+00:00:52.903 --> 00:00:55.763
+when people are free to
+work on their pet projects.
+
+00:00:55.763 --> 00:00:57.603
+And I had this itch to
+write my own solver.
+
+00:00:57.603 --> 00:01:00.903
+And I looked at ropes in
+our previous Uncharted games
+
+00:01:00.903 --> 00:01:03.333
+and they had lot of limitations,
+
+00:01:03.333 --> 00:01:04.166
+and Position Based Dynamics
+was already very popular
+
+00:01:04.166 --> 00:01:06.713
+at that time.
+
+00:01:06.713 --> 00:01:08.222
+So, I thought a rope PBD solver
+would be nice little project
+
+00:01:08.222 --> 00:01:13.222
+for a few weeks, to hone
+my simulation skills.
+
+00:01:15.703 --> 00:01:16.573
+So, yeah.
+
+00:01:16.573 --> 00:01:20.193
+After a month or two, I
+had this rope sim working.
+
+00:01:20.193 --> 00:01:22.903
+It looked better than Uncharted 3 ropes.
+
+00:01:22.903 --> 00:01:24.203
+It had some bending stiffness,
+
+00:01:24.203 --> 00:01:28.213
+and was able to interact with
+some simple collision edges,
+
+00:01:28.213 --> 00:01:31.293
+and with animated character collision.
+
+00:01:31.293 --> 00:01:33.193
+So, I felt pretty good about it.
+
+00:01:33.193 --> 00:01:35.093
+And just about then, Kurt Margenau,
+
+00:01:35.093 --> 00:01:38.323
+a lead designer at the time,
+came to my desk and says,
+
+00:01:38.323 --> 00:01:40.783
+"We'll need some better
+rope for Uncharted 4."
+
+00:01:40.783 --> 00:01:43.073
+So, I finally showed
+him my little rope sim.
+
+00:01:44.353 --> 00:01:46.653
+So, that was pretty rare coincidence.
+
+00:01:46.653 --> 00:01:49.783
+That doesn't happen often
+in a game developer's life,
+
+00:01:49.783 --> 00:01:51.693
+but I really had no idea
+what we were getting into
+
+00:01:51.693 --> 00:01:52.526
+at that time.
+
+00:01:53.932 --> 00:01:54.765
+(waves crashing)
+
+00:01:54.765 --> 00:01:57.063
+- So, Drake was going to have
+a grapple hook in Uncharted 4,
+
+00:01:57.063 --> 00:01:58.135
+and we wanted to set a new bar
+
+00:01:58.135 --> 00:02:01.993
+for presentation of grapple hook in games.
+
+00:02:01.993 --> 00:02:02.826
+We wanted something more early-stage
+
+00:02:02.826 --> 00:02:05.333
+than just a straight line.
+
+00:02:05.333 --> 00:02:07.843
+We wanted to have an actual bundle of rope
+
+00:02:07.843 --> 00:02:09.953
+that Drake would have at his belt.
+
+00:02:09.953 --> 00:02:13.103
+And he would reach for it, and
+sling the hook, and throw it,
+
+00:02:13.103 --> 00:02:15.673
+it would actually wrap around the branch.
+
+00:02:15.673 --> 00:02:16.840
+We wanted to have slack on
+different parts of the rope.
+
+00:02:16.840 --> 00:02:19.803
+(Drake grunting)
+
+00:02:19.803 --> 00:02:22.573
+- So, we needed a system
+that would be very flexible.
+
+00:02:23.973 --> 00:02:26.723
+The discretization of the rope
+had to be completely dynamic.
+
+00:02:26.723 --> 00:02:29.753
+We needed to change the
+length of the rope on the fly.
+
+00:02:29.753 --> 00:02:31.283
+And on any frame,
+
+00:02:31.283 --> 00:02:34.083
+we wanted to be able to
+choose any number of points
+
+00:02:34.083 --> 00:02:36.523
+along the rope and keyframe them.
+
+00:02:36.523 --> 00:02:38.683
+That way, we could put the
+rope into characters' hands
+
+00:02:38.683 --> 00:02:39.993
+and create these rope coils.
+
+00:02:39.993 --> 00:02:44.093
+But here, you can see the
+keyframe notes on the rope
+
+00:02:44.093 --> 00:02:46.473
+are yellow, and the white are dynamic.
+
+00:02:47.698 --> 00:02:49.063
+And in the end,
+
+00:02:49.063 --> 00:02:53.213
+we settled on the maximum
+length for the rope: 14 meters.
+
+00:02:53.213 --> 00:02:54.046
+So, I could already see
+
+00:02:54.046 --> 00:02:56.063
+that I was going to
+have performance issues.
+
+00:02:56.063 --> 00:02:58.393
+I'll talk about it little
+bit more in the second part
+
+00:02:58.393 --> 00:02:59.883
+of the presentation.
+
+00:03:01.183 --> 00:03:04.163
+And we created a system where animators
+
+00:03:04.163 --> 00:03:06.603
+could keyframe special values
+
+00:03:06.603 --> 00:03:08.293
+as part of their character animation.
+
+00:03:08.293 --> 00:03:10.953
+To tell the game what the
+character is doing with the rope.
+
+00:03:10.953 --> 00:03:12.773
+Like, which hand is holding the rope,
+
+00:03:12.773 --> 00:03:14.986
+or if both, then which goes first?
+
+00:03:14.986 --> 00:03:17.136
+How much slack should
+there be on the rope?
+
+00:03:19.473 --> 00:03:22.293
+But we didn't just aim for
+high bar in presentation.
+
+00:03:22.293 --> 00:03:24.663
+We wanted to give
+players also more freedom
+
+00:03:24.663 --> 00:03:25.763
+with the grapple hook.
+
+00:03:26.603 --> 00:03:28.853
+So here you can see, you
+have a rope attach point.
+
+00:03:28.853 --> 00:03:31.553
+And you can drop down on
+either side of the rock,
+
+00:03:31.553 --> 00:03:34.993
+and the rope will just bend
+over the edge of the rock.
+
+00:03:34.993 --> 00:03:37.573
+And then you can swing along the wall,
+
+00:03:37.573 --> 00:03:40.123
+and the rope will slide
+across the rock edges.
+
+00:03:41.573 --> 00:03:44.393
+And I realize my Dynamic Rope Simulation
+
+00:03:44.393 --> 00:03:48.133
+is just an utterly unfit
+tool for this task.
+
+00:03:48.133 --> 00:03:49.593
+I was already having problems
+
+00:03:49.593 --> 00:03:50.426
+with convergence of the rope, sort of,
+
+00:03:50.426 --> 00:03:54.033
+so, when the rope was close to taut.
+
+00:03:54.033 --> 00:03:58.213
+And getting it to interact with
+a collision in a robust way,
+
+00:03:58.213 --> 00:03:59.793
+so that we can have gameplay depend on it.
+
+00:03:59.793 --> 00:04:01.781
+And it just seemed really hard.
+
+00:04:01.781 --> 00:04:03.718
+So, we needed something different.
+
+00:04:03.718 --> 00:04:04.551
+(Drake laughing)
+
+00:04:04.551 --> 00:04:05.703
+- Something like this.
+
+00:04:07.123 --> 00:04:10.153
+So, here we started with
+this straight red line
+
+00:04:10.153 --> 00:04:12.633
+that connects the hook and Drake's hand.
+
+00:04:12.633 --> 00:04:14.983
+And then as the hook and Drake move
+
+00:04:14.983 --> 00:04:17.333
+the line will collide with convex edges,
+
+00:04:17.333 --> 00:04:20.853
+and wrap around them, and
+slide along them, to maintain
+
+00:04:20.853 --> 00:04:24.143
+the shortest distance between
+the end points of the rope.
+
+00:04:24.143 --> 00:04:25.543
+And this is a completely different thing.
+
+00:04:25.543 --> 00:04:28.743
+So, this has nothing to do with
+the Dynamic Rope Simulation.
+
+00:04:28.743 --> 00:04:30.443
+I call this Taut Rope Simulation.
+
+00:04:30.443 --> 00:04:33.543
+And the third part of this
+talk will show little bit
+
+00:04:33.543 --> 00:04:34.449
+how that works.
+
+00:04:34.449 --> 00:04:35.393
+(Drake grunting)
+
+00:04:35.393 --> 00:04:38.953
+It didn't seem like a
+terribly hard problem to me
+
+00:04:38.953 --> 00:04:40.263
+at the beginning,
+
+00:04:40.263 --> 00:04:43.056
+but it turned out I was
+quite wrong about that.
+
+00:04:43.056 --> 00:04:44.537
+(Drake grunting)
+
+00:04:44.537 --> 00:04:47.773
+So, all the grapple hook
+gameplay in Uncharted 4
+
+00:04:47.773 --> 00:04:49.823
+depends on this Taut Rope Sim.
+
+00:04:49.823 --> 00:04:51.553
+So, even if the rope has some slack,
+
+00:04:51.553 --> 00:04:54.243
+we always maintain this
+invisible straight line
+
+00:04:54.243 --> 00:04:58.993
+that connects the attach point,
+the hook, and Drake's hands.
+
+00:04:58.993 --> 00:05:00.033
+And this line has to always
+stay out of collision,
+
+00:05:00.033 --> 00:05:01.883
+And this line has to always
+stay out of collision,
+
+00:05:01.883 --> 00:05:04.523
+and it tells us how far can Drake go.
+
+00:05:04.523 --> 00:05:06.003
+It also serves as a safe line
+
+00:05:06.003 --> 00:05:08.393
+for the Dynamic Rope Simulation.
+
+00:05:08.393 --> 00:05:10.813
+We have these distance
+constraints that don't let
+
+00:05:10.813 --> 00:05:14.963
+the dynamic nodes to get too
+far away from the safe line.
+
+00:05:14.963 --> 00:05:16.853
+And as the rope gets closer to taut,
+
+00:05:16.853 --> 00:05:19.163
+then the distance gets shorter.
+
+00:05:20.194 --> 00:05:21.103
+(rope whipping)
+
+00:05:21.103 --> 00:05:23.533
+And so, for the rest of
+Uncharted 4 production,
+
+00:05:23.533 --> 00:05:26.163
+all the effort on the rope
+was focused on getting
+
+00:05:26.163 --> 00:05:29.573
+this Taut Rope Sim
+working and robust enough
+
+00:05:29.573 --> 00:05:31.384
+so that we could ship the game.
+
+00:05:31.384 --> 00:05:36.033
+The Dynamic Rope Sim was
+really, good as it was,
+
+00:05:36.033 --> 00:05:38.533
+since it was really just
+visual icing on the cake.
+
+00:05:39.865 --> 00:05:40.698
+- [Drake] Got some big
+plans for this winch.
+
+00:05:40.698 --> 00:05:42.233
+- [Jaroslav Sinecky] So,
+another idea designers had
+
+00:05:42.233 --> 00:05:46.543
+for Uncharted 4 was to put a
+winch on our off-road vehicle
+
+00:05:46.543 --> 00:05:48.743
+to create some new gameplay mechanics.
+
+00:05:48.743 --> 00:05:52.873
+And they wanted some pretty
+long rope for the winch.
+
+00:05:52.873 --> 00:05:54.703
+So, they were coming to
+me from the beginning
+
+00:05:54.703 --> 00:05:57.583
+and asking for a rope that
+would be longer than 14 meters.
+
+00:05:57.583 --> 00:06:00.363
+I was always saying, "No,
+no. 14-meter is the maximum,"
+
+00:06:01.213 --> 00:06:02.273
+but they really wanted it.
+
+00:06:02.273 --> 00:06:05.303
+So, they prototyped with
+16-meter long winch rope anyway.
+
+00:06:06.223 --> 00:06:08.673
+Fortunately, the Taut Rope
+Sim was a great solution
+
+00:06:08.673 --> 00:06:09.833
+to this problem also.
+
+00:06:10.733 --> 00:06:13.663
+The winch rope always has
+a lot of tension in it.
+
+00:06:13.663 --> 00:06:15.033
+So, it was okay to say
+
+00:06:15.033 --> 00:06:17.493
+it will always be
+completely straight line.
+
+00:06:17.493 --> 00:06:19.143
+No slack at all.
+
+00:06:19.143 --> 00:06:20.693
+And for the Taut Rope Sim,
+
+00:06:20.693 --> 00:06:23.363
+the length is not really a limitation.
+
+00:06:23.363 --> 00:06:25.063
+There's no regular discretization.
+
+00:06:25.961 --> 00:06:27.723
+So, the cost of the simulation,
+
+00:06:27.723 --> 00:06:29.683
+really just depends on
+the amount and complexity
+
+00:06:29.683 --> 00:06:32.667
+of the geometry that it
+has to interact with.
+
+00:06:32.667 --> 00:06:33.553
+(wind whistling)
+
+00:06:33.553 --> 00:06:35.163
+- So, we shipped Uncharted 4.
+
+00:06:35.163 --> 00:06:37.873
+And then we started
+pre-production on Last of Us 2.
+
+00:06:37.873 --> 00:06:41.003
+And designers were looking
+for some new puzzle mechanics.
+
+00:06:41.853 --> 00:06:43.043
+And they were thinking
+
+00:06:43.043 --> 00:06:45.493
+Ellie could carry a bundle of rope on her.
+
+00:06:45.493 --> 00:06:48.603
+And maybe she could just throw
+it into the level anywhere
+
+00:06:48.603 --> 00:06:50.293
+and tie one end somewhere,
+
+00:06:50.293 --> 00:06:52.303
+and then go around, pick up the other end,
+
+00:06:52.303 --> 00:06:54.313
+and maybe climb up.
+
+00:06:54.313 --> 00:06:57.403
+And it seems like we have
+this great rope tech,
+
+00:06:57.403 --> 00:06:59.983
+so we should just be able to do it, right?
+
+00:06:59.983 --> 00:07:02.703
+And it was actually difficult to explain
+
+00:07:02.703 --> 00:07:04.363
+why we can't just do it out of the box.
+
+00:07:04.363 --> 00:07:06.134
+And why is it hard?
+
+00:07:06.134 --> 00:07:09.943
+The reason is that you
+lose the safe line, right?
+
+00:07:09.943 --> 00:07:12.471
+Once you throw a bundle
+of rope into the level,
+
+00:07:12.471 --> 00:07:16.123
+the Dynamic Rope Simulation
+has to take care of itself.
+
+00:07:16.123 --> 00:07:18.323
+So, it has to behave reasonably,
+
+00:07:18.323 --> 00:07:19.176
+always stay out of collision
+
+00:07:19.176 --> 00:07:23.213
+so that Ellie can go and
+get it back at any point
+
+00:07:23.213 --> 00:07:24.770
+and then use it again.
+
+00:07:24.770 --> 00:07:26.873
+But we decided that it's worth trying.
+
+00:07:26.873 --> 00:07:28.493
+See if you can pull it off.
+
+00:07:28.493 --> 00:07:31.233
+At least we limited ourselves to ropes
+
+00:07:31.233 --> 00:07:34.013
+that are always attached
+at some predefined points.
+
+00:07:34.013 --> 00:07:35.683
+So, you don't just carry it all
+
+00:07:35.683 --> 00:07:38.343
+but you could throw anywhere in the level.
+
+00:07:38.343 --> 00:07:40.593
+And for Last of Us 2 production,
+
+00:07:40.593 --> 00:07:43.132
+all the effort on the rope was focused on
+
+00:07:43.132 --> 00:07:46.263
+revamping the Dynamic Rope
+Simulation for a change.
+
+00:07:47.113 --> 00:07:48.423
+So, we needed it to make it robust
+
+00:07:48.423 --> 00:07:49.663
+so it never clips into collision,
+
+00:07:49.663 --> 00:07:52.456
+and the friction needed a lot of work.
+
+00:07:52.456 --> 00:07:54.144
+We tried to make it capable
+
+00:07:54.144 --> 00:07:56.907
+of sliding across collision features even
+
+00:07:56.907 --> 00:08:00.303
+if you pull on the rope very
+fast, or throw it very fast.
+
+00:08:02.483 --> 00:08:05.289
+And we didn't have any
+magic when we didn't want to
+
+00:08:05.289 --> 00:08:07.823
+have any magic, when bundling the rope,
+
+00:08:07.823 --> 00:08:10.863
+unlike in Uncharted 4, where
+there is no time for that.
+
+00:08:10.863 --> 00:08:12.543
+So Ellie really meticulously gathers
+
+00:08:12.543 --> 00:08:14.593
+all the 14 meters of the rope into coils.
+
+00:08:15.993 --> 00:08:19.233
+We still use the Taut
+Rope Sim when we can.
+
+00:08:19.233 --> 00:08:21.673
+It's there whenever Ellie
+is holding the rope,
+
+00:08:21.673 --> 00:08:23.223
+it tells us how far she can go.
+
+00:08:24.423 --> 00:08:27.213
+It helps guide the throws.
+
+00:08:27.213 --> 00:08:29.673
+And as soon as Ellie picks up the rope
+
+00:08:29.673 --> 00:08:31.903
+we use the Dynamic Rope
+as a starting point
+
+00:08:31.903 --> 00:08:33.983
+to quickly find the invisible Taut Line,
+
+00:08:34.863 --> 00:08:37.143
+which you can see
+happening in the video now.
+
+00:08:38.633 --> 00:08:40.093
+So, it was a lot of work,
+
+00:08:40.093 --> 00:08:42.243
+but the rope puzzles
+in Last of Us 2 are...
+
+00:08:43.113 --> 00:08:44.373
+It's a very unique mechanic.
+
+00:08:44.373 --> 00:08:47.173
+So, you can't really do
+anything similar in other games.
+
+00:08:48.253 --> 00:08:50.883
+And the rope tech was used
+for some other elements
+
+00:08:50.883 --> 00:08:52.033
+in both games.
+
+00:08:52.033 --> 00:08:54.633
+The weapon straps are
+driven by a rope sim.
+
+00:08:56.833 --> 00:08:57.666
+You can see the enemy weapon strap
+
+00:08:57.666 --> 00:09:02.666
+has just like, four dynamic
+nodes to make it really cheap.
+
+00:09:03.063 --> 00:09:05.713
+But it's actually enough
+for quite believable effect.
+
+00:09:07.584 --> 00:09:09.653
+It was also for horse reins,
+
+00:09:10.550 --> 00:09:13.550
+(footsteps padding)
+
+00:09:15.723 --> 00:09:17.143
+- for dog leashes,
+
+00:09:20.613 --> 00:09:22.983
+or things like this chained infected.
+
+00:09:24.352 --> 00:09:27.185
+(chains rattling)
+
+00:09:28.853 --> 00:09:31.013
+- Okay. So, all these videos we just saw
+
+00:09:31.013 --> 00:09:33.453
+was to give you some context
+for the technical part.
+
+00:09:33.453 --> 00:09:34.303
+It will come now.
+
+00:09:35.623 --> 00:09:37.973
+So, we can understand why we did this
+
+00:09:37.973 --> 00:09:40.263
+and what can be done
+with this kind of tech.
+
+00:09:40.263 --> 00:09:43.594
+And now let's look at
+how we actually did it.
+
+00:09:43.594 --> 00:09:44.733
+Before we start,
+
+00:09:44.733 --> 00:09:46.223
+I just want to say all the equations
+
+00:09:46.223 --> 00:09:48.633
+that you will see are here
+really just for reference.
+
+00:09:48.633 --> 00:09:50.473
+So, you don't have to
+worry too much about them.
+
+00:09:50.473 --> 00:09:53.023
+You should be able to follow
+the main ideas anyway.
+
+00:09:54.293 --> 00:09:55.963
+So, the second part is going to be about
+
+00:09:55.963 --> 00:09:57.903
+the Dynamic Rope Simulation.
+
+00:09:57.903 --> 00:10:00.033
+And before we get to some
+more interesting stuff,
+
+00:10:05.563 --> 00:10:07.233
+For more details on PBD in general,
+
+00:10:07.233 --> 00:10:10.343
+I will refer you to this
+seminal work by Müller and Co,
+
+00:10:10.343 --> 00:10:12.073
+but you can find a lot of material
+
+00:10:12.073 --> 00:10:13.473
+around the web on the topic.
+
+00:10:14.653 --> 00:10:17.843
+So, let's say we have this piece of rope,
+
+00:10:17.843 --> 00:10:20.503
+but it's discretized into
+a set of connected nodes.
+
+00:10:20.503 --> 00:10:23.733
+The solid black is fixed
+and the others are dynamic.
+
+00:10:23.733 --> 00:10:25.363
+And in the given moment,
+
+00:10:25.363 --> 00:10:27.973
+we know the position and
+velocity for each of the nodes.
+
+00:10:27.973 --> 00:10:30.283
+So, this is the current state of the rope.
+
+00:10:30.283 --> 00:10:33.813
+Now we want to move forward
+in time with step ∆t.
+
+00:10:33.813 --> 00:10:35.283
+So first, we apply some damping,
+
+00:10:35.283 --> 00:10:37.693
+which will reduce our
+velocities little bit.
+
+00:10:37.693 --> 00:10:39.259
+Next, we apply external forces,
+
+00:10:39.259 --> 00:10:41.793
+which will modify the velocity some more.
+
+00:10:41.793 --> 00:10:43.777
+In this case, we have just gravity,
+
+00:10:43.777 --> 00:10:46.073
+but we could have vit force for example.
+
+00:10:46.980 --> 00:10:50.773
+And now we use these
+velocities to move positions
+
+00:10:50.773 --> 00:10:53.373
+forward in time by step ∆t.
+
+00:10:53.373 --> 00:10:55.973
+And this will be the estimate
+for our new positions.
+
+00:10:57.573 --> 00:10:59.203
+But the new positions do not look right.
+
+00:10:59.203 --> 00:11:00.753
+The rope has stretched.
+
+00:11:00.753 --> 00:11:03.313
+And also let's assume we
+have this purple piece
+
+00:11:03.313 --> 00:11:04.553
+of collision geometry here,
+
+00:11:04.553 --> 00:11:07.133
+and the rope is clipping
+into the collision.
+
+00:11:07.133 --> 00:11:09.543
+So now, comes the constraint
+solving part of the algorithm.
+
+00:11:09.543 --> 00:11:12.223
+So, we will need some
+constraints to prevent the rope
+
+00:11:12.223 --> 00:11:14.623
+from stretching and
+clipping into collision.
+
+00:11:14.623 --> 00:11:16.463
+And since this is a
+Position Based Dynamic,
+
+00:11:16.463 --> 00:11:20.153
+the constraints will act on
+the position of the nodes
+
+00:11:20.153 --> 00:11:22.053
+and we will directly move the nodes
+
+00:11:22.053 --> 00:11:23.633
+to satisfy these constraints.
+
+00:11:24.503 --> 00:11:27.693
+So firstly, we want a constraint
+that keep neighboring nodes
+
+00:11:27.693 --> 00:11:31.743
+at the same constant
+distance l₀ from each other.
+
+00:11:31.743 --> 00:11:33.503
+And this format looks
+slightly complicated,
+
+00:11:33.503 --> 00:11:36.933
+but what we're doing here really
+is very simple and natural.
+
+00:11:36.933 --> 00:11:40.653
+So, for the first two nodes,
+since the first node is fixed,
+
+00:11:40.653 --> 00:11:43.073
+you just move the second node closer to it
+
+00:11:43.073 --> 00:11:45.113
+to fix the distance.
+
+00:11:45.113 --> 00:11:46.873
+And for the second and third node,
+
+00:11:46.873 --> 00:11:48.363
+since they have a equal masses,
+
+00:11:48.363 --> 00:11:51.773
+we just move them closer together
+by the same distance each.
+
+00:11:51.773 --> 00:11:54.273
+And then we do the same
+for the last two nodes.
+
+00:11:54.273 --> 00:11:56.913
+And here we add the collision constraints.
+
+00:11:56.913 --> 00:11:58.413
+Collision constraint.
+
+00:11:58.413 --> 00:12:01.013
+We just means that we will move the node
+
+00:12:01.013 --> 00:12:01.846
+out of the collision.
+
+00:12:01.846 --> 00:12:05.113
+So, we will move it along the plane normal
+
+00:12:05.113 --> 00:12:06.813
+until it sits on top of the plane.
+
+00:12:08.473 --> 00:12:10.123
+Now, as you have noticed probably,
+
+00:12:10.123 --> 00:12:11.823
+by solving one constraint,
+
+00:12:11.823 --> 00:12:13.403
+we violated the constraints
+
+00:12:13.403 --> 00:12:15.083
+that we already solved previously.
+
+00:12:15.083 --> 00:12:17.013
+So, the rope is still
+stretched a little bit
+
+00:12:17.013 --> 00:12:19.213
+at the beginning and
+compressed at the end.
+
+00:12:19.213 --> 00:12:21.293
+So, we will need to go
+over these constraints
+
+00:12:21.293 --> 00:12:22.553
+again and again.
+
+00:12:22.553 --> 00:12:24.783
+You'll have to iterate
+until all the constraints
+
+00:12:24.783 --> 00:12:26.133
+are more or less satisfied.
+
+00:12:27.723 --> 00:12:30.953
+And how do we decide that we are satisfied
+
+00:12:30.953 --> 00:12:32.583
+and we can stop iterating?
+
+00:12:32.583 --> 00:12:34.067
+So usually, either...
+
+00:12:34.067 --> 00:12:37.693
+We stop usually when there
+is some maximum error
+
+00:12:37.693 --> 00:12:40.193
+that's smaller than some threshold Ɛ,
+
+00:12:40.193 --> 00:12:43.563
+or when we reach a maximum
+number of iterations.
+
+00:12:43.563 --> 00:12:44.623
+I can tell you that for PBD,
+
+00:12:44.623 --> 00:12:46.873
+you don't want to use
+the maximum error area
+
+00:12:46.873 --> 00:12:49.043
+because if you change number of iterations
+
+00:12:49.043 --> 00:12:50.343
+from frame to frame,
+
+00:12:50.343 --> 00:12:53.313
+you're basically changing
+the stiffness of the solver.
+
+00:12:53.313 --> 00:12:56.263
+So, you just want to keep the
+number of iterations constant.
+
+00:12:57.253 --> 00:12:59.223
+And after, we found final positions
+
+00:12:59.223 --> 00:13:01.083
+that satisfy our constraints.
+
+00:13:01.083 --> 00:13:03.423
+So, we need to find
+the correct velocities.
+
+00:13:03.423 --> 00:13:08.423
+And this is just done by
+subtracting from the final position
+
+00:13:08.563 --> 00:13:11.093
+from the position on the previous frame
+
+00:13:11.093 --> 00:13:12.333
+and dividing by ∆t.
+
+00:13:13.273 --> 00:13:15.723
+And now, we have a new
+rope state for this frame.
+
+00:13:16.793 --> 00:13:18.253
+So, that was pretty simple, right?
+
+00:13:18.253 --> 00:13:19.783
+And the fact that you manipulate
+
+00:13:19.783 --> 00:13:21.603
+the position of the nodes directly
+
+00:13:21.603 --> 00:13:24.344
+makes it very easy to
+understand what you're doing.
+
+00:13:24.344 --> 00:13:25.973
+It's also very stable, actually,
+
+00:13:25.973 --> 00:13:29.533
+because again, as you
+control the positions,
+
+00:13:29.533 --> 00:13:31.853
+the simulation can't really
+explode as it easily does
+
+00:13:31.853 --> 00:13:35.313
+when you're solving for
+some internal forces.
+
+00:13:35.313 --> 00:13:38.313
+But that's why PBD is so popular in games.
+
+00:13:38.313 --> 00:13:41.413
+So, if you need for
+now, limit ourself to...
+
+00:13:41.413 --> 00:13:45.123
+Or limit our collision geometry
+to just a flat ground plane
+
+00:13:45.123 --> 00:13:47.343
+and the constraint for
+that can be expressed
+
+00:13:47.343 --> 00:13:49.813
+with this simple one line of code.
+
+00:13:49.813 --> 00:13:52.703
+What I just showed you can be
+coded in one, like, afternoon.
+
+00:13:52.703 --> 00:13:55.183
+And you can get something like this.
+
+00:13:55.183 --> 00:13:56.323
+So here,
+
+00:13:56.323 --> 00:13:59.313
+the right end of the rope is
+anchored and I let it fall.
+
+00:14:00.333 --> 00:14:02.233
+Ellie's just standing there for scale.
+
+00:14:04.173 --> 00:14:06.533
+So, that's not bad, right?
+
+00:14:06.533 --> 00:14:08.473
+But there are few
+problems you will notice.
+
+00:14:08.473 --> 00:14:10.133
+One is that there is no friction
+
+00:14:10.133 --> 00:14:12.443
+between the rope and the floor.
+
+00:14:12.443 --> 00:14:14.993
+And when you look closer
+at the rope on the ground,
+
+00:14:14.993 --> 00:14:18.063
+you can see how it bends
+at these sharp angles.
+
+00:14:18.063 --> 00:14:19.693
+So, the rope has a resistance to bending.
+
+00:14:19.693 --> 00:14:22.093
+So, we would want to add
+some bending stiffness,
+
+00:14:23.523 --> 00:14:26.403
+or bending constraints to
+prevent these sharp angles.
+
+00:14:27.263 --> 00:14:29.713
+So, how can we create a
+bending stiffness constraint?
+
+00:14:29.713 --> 00:14:32.343
+So, let's say we have these
+three neighboring nodes
+
+00:14:32.343 --> 00:14:34.833
+with masses: m₁, 2, 3.
+
+00:14:34.833 --> 00:14:37.403
+And we want to straighten
+up the segment of rope
+
+00:14:37.403 --> 00:14:40.063
+by moving them all along
+the same direction.
+
+00:14:40.063 --> 00:14:43.013
+And for now, let's assume
+you want to push them
+
+00:14:43.013 --> 00:14:44.803
+all the way into a straight line.
+
+00:14:44.803 --> 00:14:48.763
+And how do we find these
+unknowns: d₁, d₂, d₃?
+
+00:14:48.763 --> 00:14:51.173
+So, since the targets are
+supposed to be on a straight line,
+
+00:14:51.173 --> 00:14:53.043
+that gives us one equation.
+
+00:14:53.043 --> 00:14:55.946
+And then, we need to conserve
+the linear and angular
+
+00:14:55.946 --> 00:14:58.893
+momentum of this little
+system of three nodes.
+
+00:14:58.893 --> 00:15:00.033
+And that gives us two more equations,
+
+00:15:06.653 --> 00:15:08.413
+Why do I move the nodes in this direction?
+
+00:15:08.413 --> 00:15:09.246
+All right.
+
+00:15:09.246 --> 00:15:10.973
+I could move them in
+some different direction.
+
+00:15:10.973 --> 00:15:12.333
+In fact, the most natural here,
+
+00:15:12.333 --> 00:15:16.833
+would be probably to pivot
+m₁, m₃ around m₂ like that
+
+00:15:16.833 --> 00:15:18.663
+to straighten up this segment.
+
+00:15:18.663 --> 00:15:19.496
+So, yes.
+
+00:15:19.496 --> 00:15:21.113
+You do have a lot of freedom
+
+00:15:21.113 --> 00:15:23.428
+of how to create your constraints.
+
+00:15:23.428 --> 00:15:25.093
+The bending stiffness could be done
+
+00:15:25.093 --> 00:15:26.723
+in many different ways.
+
+00:15:26.723 --> 00:15:28.993
+I just chose this way
+because it seemed convenient.
+
+00:15:28.993 --> 00:15:30.513
+And because I wanted to avoid using
+
+00:15:30.513 --> 00:15:32.921
+any trigonometric functions
+to keep the evaluation
+
+00:15:32.921 --> 00:15:34.303
+as cheap as possible.
+
+00:15:35.352 --> 00:15:39.653
+But, the conservation of
+momentum is an important rule
+
+00:15:39.653 --> 00:15:41.543
+that you need to observe.
+
+00:15:41.543 --> 00:15:43.283
+I know you probably heard
+it many times before,
+
+00:15:43.283 --> 00:15:44.663
+but it's easy to forget.
+
+00:15:44.663 --> 00:15:46.143
+So, if you ever get the rope
+
+00:15:46.143 --> 00:15:48.583
+that's resting on its own like a snake,
+
+00:15:48.583 --> 00:15:49.583
+you probably have a constraint
+
+00:15:49.583 --> 00:15:50.923
+that doesn't conserve momentum,
+
+00:15:50.923 --> 00:15:53.093
+and it's adding energy into the rope.
+
+00:15:54.583 --> 00:15:56.833
+And now we do the math with
+the system of equations,
+
+00:15:56.833 --> 00:15:59.633
+and we get this result
+for the displacements.
+
+00:15:59.633 --> 00:16:02.693
+And each one is a multiplication
+of the same expression h.
+
+00:16:02.693 --> 00:16:05.123
+And because we don't really
+want to push the nodes
+
+00:16:05.123 --> 00:16:08.063
+all the way into the straight
+line on each iteration,
+
+00:16:08.063 --> 00:16:09.679
+it would be way too aggressive.
+
+00:16:09.679 --> 00:16:11.843
+So, we introduced this multiplier 𝜁
+
+00:16:11.843 --> 00:16:13.583
+and that will be our bending stiffness.
+
+00:16:13.583 --> 00:16:17.094
+So, that's the value we
+can use to tweak how stiff
+
+00:16:17.094 --> 00:16:19.494
+should the rope behave
+when it comes to bending.
+
+00:16:20.723 --> 00:16:22.473
+And they respond more loose end to tie.
+
+00:16:22.473 --> 00:16:25.209
+So, we have coefficient
+for bending stiffness,
+
+00:16:25.209 --> 00:16:26.982
+but the target for the
+constraint is still to achieve
+
+00:16:26.982 --> 00:16:28.123
+a straight line.
+
+00:16:28.123 --> 00:16:31.483
+So, the constraint will still
+be trying to move the rope,
+
+00:16:31.483 --> 00:16:33.143
+even just a little by a little,
+
+00:16:33.143 --> 00:16:35.493
+until it reaches a
+completely straight line.
+
+00:16:35.493 --> 00:16:37.573
+The real rope up to a certain point,
+
+00:16:37.573 --> 00:16:39.993
+you can bend it without
+resistance, basically.
+
+00:16:39.993 --> 00:16:41.373
+It has some free bending radius.
+
+00:16:41.373 --> 00:16:43.543
+So, if you wan to do
+something similar here,
+
+00:16:43.543 --> 00:16:46.038
+so we introduced this 𝛼f
+as a free bending angle
+
+00:16:46.038 --> 00:16:48.173
+per one meter of rope.
+
+00:16:48.173 --> 00:16:51.673
+And the equations are here
+really just for reference.
+
+00:16:51.673 --> 00:16:54.030
+But the idea is that simply
+the bending stiffness
+
+00:16:54.030 --> 00:16:57.623
+will only straighten the rope
+up to the free bending angle
+
+00:16:57.623 --> 00:16:58.883
+and then stop acting.
+
+00:17:00.443 --> 00:17:03.553
+And now we can look at our rope
+with this bending stiffness,
+
+00:17:03.553 --> 00:17:05.303
+bending stiffness constraint added.
+
+00:17:07.713 --> 00:17:08.953
+And we can see that it does not have
+
+00:17:08.953 --> 00:17:10.933
+those ugly sharp corners anymore.
+
+00:17:10.933 --> 00:17:13.203
+It tends to create these
+more smooth curves,
+
+00:17:14.143 --> 00:17:16.833
+but we'll need to do something
+about the friction, right?
+
+00:17:18.113 --> 00:17:20.713
+So, friction is problematic with PBD
+
+00:17:20.713 --> 00:17:24.243
+because since you're solving
+constraints on position level,
+
+00:17:24.243 --> 00:17:26.353
+you don't know what the
+constraint forces are.
+
+00:17:26.353 --> 00:17:28.723
+So, you don't know what's
+the tension of the rope.
+
+00:17:28.723 --> 00:17:30.383
+You don't know what is
+the force between the rope
+
+00:17:30.383 --> 00:17:31.703
+and the collision.
+
+00:17:31.703 --> 00:17:33.253
+So, that's one drawback of PBD.
+
+00:17:34.173 --> 00:17:35.323
+And because, for friction,
+
+00:17:35.323 --> 00:17:36.533
+you need to know the normal force
+
+00:17:36.533 --> 00:17:37.623
+between the rope and the collision.
+
+00:17:37.623 --> 00:17:39.253
+You can't really do that.
+
+00:17:39.253 --> 00:17:43.043
+But one simple thing that you
+can do is just to remember
+
+00:17:43.043 --> 00:17:46.313
+collision constraint that
+were used during the solver.
+
+00:17:46.313 --> 00:17:49.313
+So, where a node had to be
+moved out of the collision
+
+00:17:49.313 --> 00:17:51.993
+and reduce the tangential
+velocity at that node
+
+00:17:51.993 --> 00:17:53.603
+by some coefficient.
+
+00:17:53.603 --> 00:17:55.603
+And this is done after the solver,
+
+00:17:55.603 --> 00:17:58.773
+once you calculated the new
+velocities for each node.
+
+00:17:58.773 --> 00:18:00.853
+And even though this is a
+very simple approximation,
+
+00:18:00.853 --> 00:18:02.393
+it might be all you need.
+
+00:18:02.393 --> 00:18:04.123
+I'll show you how it looks when we add it
+
+00:18:04.123 --> 00:18:05.523
+to our little test case.
+
+00:18:11.623 --> 00:18:14.383
+So, that looks like a pretty
+bit of the rope, in this case,
+
+00:18:14.383 --> 00:18:17.963
+and this is all we needed
+for Uncharted 4, for example.
+
+00:18:17.963 --> 00:18:20.183
+Mostly, because the rope
+never had too much slack,
+
+00:18:20.183 --> 00:18:23.453
+and it was always connected
+to something on both ends.
+
+00:18:23.453 --> 00:18:26.403
+Unfortunately, it wasn't
+enough for Last of Us 2.
+
+00:18:26.403 --> 00:18:28.582
+I'm going to show you these two cases
+
+00:18:28.582 --> 00:18:31.733
+where it fails to
+produce billable results.
+
+00:18:31.733 --> 00:18:34.703
+So in this first case, the
+velocities are reduced,
+
+00:18:34.703 --> 00:18:36.963
+and just a handful of
+nodes that are in contact
+
+00:18:36.963 --> 00:18:38.043
+with the bar.
+
+00:18:38.043 --> 00:18:39.283
+That's just not enough to keep
+
+00:18:39.283 --> 00:18:41.964
+the rope from sliding
+back and forth like that.
+
+00:18:41.964 --> 00:18:45.193
+It is a high contact force
+between the rope and the bar
+
+00:18:45.193 --> 00:18:48.104
+due to the weight of the rope,
+which means high friction.
+
+00:18:48.104 --> 00:18:49.343
+But we don't know that.
+
+00:18:50.873 --> 00:18:52.853
+And then, there is this other case.
+
+00:18:58.053 --> 00:19:00.353
+Where the rope just keeps
+sliding and sliding.
+
+00:19:01.785 --> 00:19:04.163
+Yeah. So, for our puzzles it was important
+
+00:19:04.163 --> 00:19:06.473
+that if it looks like the
+rope should stay up there,
+
+00:19:06.473 --> 00:19:07.963
+that it actually stays up there.
+
+00:19:07.963 --> 00:19:09.793
+So, we needed to do something
+at least a little bit more
+
+00:19:09.793 --> 00:19:11.893
+realistic for the friction.
+
+00:19:11.893 --> 00:19:14.673
+And so, one thing we did is this kind of
+
+00:19:14.673 --> 00:19:17.168
+Static Rope Tension analysis.
+
+00:19:17.168 --> 00:19:18.783
+This is then, after the solver.
+
+00:19:18.783 --> 00:19:21.233
+And we look at the rope
+shape and nobody touches,
+
+00:19:21.233 --> 00:19:23.731
+or would upset our collision,
+and try to approximate
+
+00:19:23.731 --> 00:19:26.543
+what the tension, and the
+resulting contact force,
+
+00:19:26.543 --> 00:19:28.623
+and the friction of the rope could be.
+
+00:19:29.543 --> 00:19:31.923
+And we use facts like, the
+tension is zero at the free end
+
+00:19:31.923 --> 00:19:33.273
+of the rope.
+
+00:19:33.273 --> 00:19:35.673
+If the rope bends around
+the collision edge,
+
+00:19:35.673 --> 00:19:39.719
+we approximate the resulting
+normal force and friction.
+
+00:19:39.719 --> 00:19:41.383
+If the rope touches collision,
+
+00:19:41.383 --> 00:19:44.173
+we approximate the normal
+force due to the gravity.
+
+00:19:45.073 --> 00:19:46.623
+If the rope is bending a lot,
+
+00:19:46.623 --> 00:19:49.433
+and it's not because it
+bends around collision edge,
+
+00:19:49.433 --> 00:19:51.893
+we let the tension fall off to zero.
+
+00:19:51.893 --> 00:19:54.063
+And for a free hanging segment of rope,
+
+00:19:54.063 --> 00:19:56.373
+we just add tension
+resulting from gravity.
+
+00:19:57.363 --> 00:19:59.563
+And so, this is all very approximate.
+
+00:19:59.563 --> 00:20:00.033
+It's completely wrong when
+the rope is moving a lot,
+
+00:20:00.033 --> 00:20:02.353
+It's completely wrong when
+the rope is moving a lot,
+
+00:20:02.353 --> 00:20:05.283
+because we don't take
+velocities into account at all,
+
+00:20:05.283 --> 00:20:08.997
+but that's okay because the
+friction is not important for us
+
+00:20:08.997 --> 00:20:11.939
+when the rope is moving fast.
+
+00:20:11.939 --> 00:20:15.928
+So, this worked fine for
+us for the rope puzzles,
+
+00:20:15.928 --> 00:20:18.203
+but there was one more thing we had to do.
+
+00:20:18.203 --> 00:20:20.052
+So, if you reduce...
+
+00:20:20.052 --> 00:20:23.063
+If you use friction to reduce velocities
+
+00:20:23.063 --> 00:20:24.113
+after the solver step,
+
+00:20:24.113 --> 00:20:26.903
+it is very hard to bring
+the rope to complete rest.
+
+00:20:26.903 --> 00:20:30.423
+Even if you have high
+friction and you remove all
+
+00:20:30.423 --> 00:20:31.623
+the velocity from a node,
+
+00:20:31.623 --> 00:20:33.823
+if there is some external
+force or constraint
+
+00:20:33.823 --> 00:20:35.823
+pulling on the node,
+even just a little bit,
+
+00:20:35.823 --> 00:20:38.187
+it will move during the next solver step,
+
+00:20:38.187 --> 00:20:40.987
+because solver doesn't know
+anything about the friction.
+
+00:20:41.833 --> 00:20:45.253
+So, we introduce the friction
+constraint into the solver.
+
+00:20:45.253 --> 00:20:46.086
+It's very simple.
+
+00:20:46.086 --> 00:20:48.573
+You just need to remember the
+original position at the start
+
+00:20:48.573 --> 00:20:49.823
+of the time step.
+
+00:20:49.823 --> 00:20:52.263
+So there's the p line
+here, and the constraint
+
+00:20:52.263 --> 00:20:55.753
+is pulling the node back
+towards that position.
+
+00:20:55.753 --> 00:20:57.113
+And we again split the effect
+
+00:20:57.113 --> 00:20:59.633
+into proportional and constant friction.
+
+00:20:59.633 --> 00:21:01.843
+And the constant friction
+is basically what enables
+
+00:21:01.843 --> 00:21:03.933
+the effect of static friction.
+
+00:21:03.933 --> 00:21:06.623
+So if the node is within the radius Sfc
+
+00:21:07.727 --> 00:21:09.109
+from the original position,
+
+00:21:09.109 --> 00:21:11.323
+it will snap back to the original position
+
+00:21:11.323 --> 00:21:13.349
+each time this constraint is processed.
+
+00:21:13.349 --> 00:21:16.543
+And this coefficient, Sfc, Sfp are just
+
+00:21:16.543 --> 00:21:18.123
+another empirical coefficient that
+
+00:21:18.123 --> 00:21:21.053
+you will need to find some
+values that work for you.
+
+00:21:21.053 --> 00:21:23.253
+But they are informed by
+the Rope Tension analysis
+
+00:21:23.253 --> 00:21:25.283
+that I showed you on the previous slide.
+
+00:21:26.913 --> 00:21:27.746
+And here,
+
+00:21:27.746 --> 00:21:30.343
+I will just show you that the
+friction works much better
+
+00:21:30.343 --> 00:21:31.843
+in these problematic cases.
+
+00:21:43.093 --> 00:21:43.926
+Okay.
+
+00:21:43.926 --> 00:21:45.823
+So, one topic that requires
+some more attention
+
+00:21:45.823 --> 00:21:48.571
+is the convergence,
+because it's not a great.
+
+00:21:48.571 --> 00:21:51.666
+First, if you have a long
+rope, a lot of nodes,
+
+00:21:51.666 --> 00:21:54.793
+that goes around collision
+and you pull on it
+
+00:21:54.793 --> 00:21:55.883
+on one end,
+
+00:21:55.883 --> 00:21:58.033
+it takes a lot of iterations
+to propagate this impulse
+
+00:21:58.033 --> 00:21:59.736
+to the other end of the rope.
+
+00:21:59.736 --> 00:22:03.099
+Another good example is the
+rope that's almost taut,
+
+00:22:03.099 --> 00:22:05.573
+like in this little sketch here.
+
+00:22:05.573 --> 00:22:06.406
+So in this case,
+
+00:22:06.406 --> 00:22:09.303
+the distance constraints are
+pulling the node in direction
+
+00:22:09.303 --> 00:22:10.493
+that's almost perpendicular
+
+00:22:10.493 --> 00:22:12.813
+to the direction in
+which we want it to move.
+
+00:22:12.813 --> 00:22:14.913
+So, they are very inefficient.
+
+00:22:14.913 --> 00:22:16.173
+And from my experience,
+
+00:22:16.173 --> 00:22:17.723
+you basically need a number of iterations
+
+00:22:17.723 --> 00:22:20.363
+that's proportional to the
+number of nodes in the rope.
+
+00:22:20.363 --> 00:22:21.893
+But one iteration means going over
+
+00:22:21.893 --> 00:22:23.653
+all the constraints in the rope.
+
+00:22:23.653 --> 00:22:26.613
+And that makes the cost of
+the simulation quadratic
+
+00:22:26.613 --> 00:22:28.743
+in terms of the number of nodes.
+
+00:22:28.743 --> 00:22:30.193
+And it can be very expensive.
+
+00:22:31.453 --> 00:22:33.873
+So, what can we do to improve that?
+
+00:22:33.873 --> 00:22:36.383
+One common thing to do is over-relaxation.
+
+00:22:36.383 --> 00:22:39.373
+So basically, I'm iterating
+over each distance constraint.
+
+00:22:39.373 --> 00:22:42.093
+We will move the nodes
+a little bit farther.
+
+00:22:42.093 --> 00:22:43.093
+Or in other words,
+
+00:22:43.093 --> 00:22:45.671
+we pretend as if the target
+distance is a little bit shorter
+
+00:22:45.671 --> 00:22:47.643
+than what it really is.
+
+00:22:47.643 --> 00:22:49.953
+And that helps to reduce
+the stretch in the rope
+
+00:22:49.953 --> 00:22:51.293
+a little bit faster.
+
+00:22:51.293 --> 00:22:52.613
+And as long as you keep
+
+00:22:52.613 --> 00:22:54.913
+the relaxation factor ɷ conservative,
+
+00:22:54.913 --> 00:22:56.243
+it should be still stable.
+
+00:22:56.243 --> 00:22:57.543
+At least in my experience.
+
+00:22:58.473 --> 00:22:59.933
+Other common method is multigrid.
+
+00:22:59.933 --> 00:23:03.533
+So, you create a series of
+successively coarser levels
+
+00:23:03.533 --> 00:23:05.113
+of discretization.
+
+00:23:05.113 --> 00:23:07.593
+And you start on solving
+on the coarsest level.
+
+00:23:07.593 --> 00:23:08.843
+You run a few iterations.
+
+00:23:08.843 --> 00:23:10.833
+Go to the next level, et cetera.
+
+00:23:10.833 --> 00:23:14.113
+And this helps enormously
+with the convergence.
+
+00:23:14.113 --> 00:23:16.143
+Without it, if you have a
+rope that's almost taut,
+
+00:23:16.143 --> 00:23:19.173
+it basically, feels like
+it would never converge.
+
+00:23:19.173 --> 00:23:22.913
+And one note here is that we
+had to mark nodes that are
+
+00:23:22.913 --> 00:23:23.873
+at the collision edge.
+
+00:23:23.873 --> 00:23:27.363
+And those had to be part
+of the coarsest level,
+
+00:23:27.363 --> 00:23:28.883
+because if you skip them,
+
+00:23:28.883 --> 00:23:31.093
+the multigrid will start
+pulling the rope into collision
+
+00:23:31.093 --> 00:23:33.073
+and you negate the form, basically.
+
+00:23:33.073 --> 00:23:36.273
+And then you will have
+artifacts in the final results,
+
+00:23:36.273 --> 00:23:38.203
+where the rope bends in unnatural way.
+
+00:23:39.673 --> 00:23:41.613
+So, that helped but the rope simulation
+
+00:23:41.613 --> 00:23:44.283
+was still expensive for the budget we had.
+
+00:23:44.283 --> 00:23:47.523
+Even have a profile
+capture on PS4 of some case
+
+00:23:47.523 --> 00:23:49.433
+where the rope was really expensive.
+
+00:23:49.433 --> 00:23:51.573
+And you can see it really sticks out here.
+
+00:23:51.573 --> 00:23:54.493
+So, just the solver step
+is almost 12 milliseconds,
+
+00:23:54.493 --> 00:23:57.333
+and we only have six cores on PS4.
+
+00:23:57.333 --> 00:23:58.166
+So, if the rope takes
+over one core for like,
+
+00:23:58.166 --> 00:24:00.933
+half the frame, that's just not good.
+
+00:24:02.423 --> 00:24:04.763
+So, what do you do when
+you run out of ideas
+
+00:24:04.763 --> 00:24:06.553
+of how we will optimize something?
+
+00:24:06.553 --> 00:24:10.603
+Yes. You move it to GPU and
+it's not the greatest fit.
+
+00:24:10.603 --> 00:24:13.613
+Because, as I was saying,
+rope solving is inherently
+
+00:24:13.613 --> 00:24:16.076
+very serial process, as
+you're propagating impulses
+
+00:24:16.076 --> 00:24:17.153
+along the rope.
+
+00:24:18.115 --> 00:24:21.093
+We're on the one wavefront
+and process 64 nodes
+
+00:24:21.093 --> 00:24:23.993
+at the time, but it's not
+the same as doing 64 nodes,
+
+00:24:23.993 --> 00:24:25.693
+one after each other, serially.
+
+00:24:25.693 --> 00:24:26.913
+So in total,
+
+00:24:26.913 --> 00:24:29.953
+you end up doing more work on
+GPU than you would do on CPU.
+
+00:24:31.113 --> 00:24:33.323
+This is not the best
+utilization of your silicon,
+
+00:24:33.323 --> 00:24:34.423
+but we still take it.
+
+00:24:34.423 --> 00:24:36.263
+And this is why.
+
+00:24:36.263 --> 00:24:37.438
+So here, you have a GPU profile capture,
+
+00:24:37.438 --> 00:24:39.203
+and it's not much faster.
+
+00:24:39.203 --> 00:24:40.963
+It takes almost 10 milliseconds
+
+00:24:40.963 --> 00:24:43.413
+for the compute shader to finish,
+
+00:24:43.413 --> 00:24:45.543
+but the main difference
+and why this is much better
+
+00:24:45.543 --> 00:24:49.377
+is that it's just one bay front
+running on one compute unit.
+
+00:24:49.377 --> 00:24:51.883
+The PS4 GPU has 18 computing needs.
+
+00:24:51.883 --> 00:24:53.953
+And if you make sure your
+shared resource usage
+
+00:24:53.953 --> 00:24:56.233
+is not too high, several shaders may share
+
+00:24:56.233 --> 00:24:57.303
+the same compute unit.
+
+00:24:57.303 --> 00:25:00.033
+So, you're really just taking
+tiny fracture of the GPU.
+
+00:25:06.992 --> 00:25:09.530
+Saying, you have a
+collision plan and you need
+
+00:25:09.530 --> 00:25:11.223
+to push the node out.
+
+00:25:11.223 --> 00:25:12.056
+But in real level,
+
+00:25:12.056 --> 00:25:14.733
+you will have to deal with
+some complex geometry,
+
+00:25:14.733 --> 00:25:16.556
+probably some triangle, triangle mesh,
+
+00:25:16.556 --> 00:25:20.953
+or maybe just pile of triangles,
+or some convex shapes,
+
+00:25:20.953 --> 00:25:23.453
+but you still do want
+to express this geometry
+
+00:25:23.453 --> 00:25:25.913
+in some simple and compact form.
+
+00:25:25.913 --> 00:25:28.793
+It can be about it quickly
+because you're going to iterate
+
+00:25:28.793 --> 00:25:30.313
+many times over many nodes.
+
+00:25:31.443 --> 00:25:34.503
+So, what we did is we tried
+to boil down all the geometry
+
+00:25:34.503 --> 00:25:37.783
+around each node into a
+set of collision planes.
+
+00:25:37.783 --> 00:25:39.913
+And then, we needed to be able
+to collide with convex edges.
+
+00:25:39.913 --> 00:25:41.773
+So, we just marked the pairs of planes
+
+00:25:41.773 --> 00:25:43.733
+that form a convex edge.
+
+00:25:43.733 --> 00:25:46.143
+And each node has maximum
+of four collision planes
+
+00:25:46.143 --> 00:25:47.613
+and three convex edges.
+
+00:25:47.613 --> 00:25:49.923
+So, this sketch here literally represents,
+
+00:25:50.863 --> 00:25:53.173
+it's like example of
+maximum geometry complexity
+
+00:25:53.173 --> 00:25:55.233
+that could be accurately expressed
+
+00:25:55.233 --> 00:25:57.503
+with the collision
+constraints for one node.
+
+00:25:59.223 --> 00:26:01.539
+And this second sketch shows the edge one,
+
+00:26:01.539 --> 00:26:04.063
+when we're looking along the edge.
+
+00:26:04.063 --> 00:26:05.863
+And it shows what the
+collision constraint is doing
+
+00:26:05.863 --> 00:26:09.133
+for the pair of planes n₁, n₂ .
+
+00:26:09.133 --> 00:26:10.593
+So we have to...
+
+00:26:10.593 --> 00:26:11.923
+Since they form convex edge,
+
+00:26:11.923 --> 00:26:14.173
+we have to check where is
+the center of the node.
+
+00:26:14.173 --> 00:26:17.813
+And if it's in the blue area
+A₃, it glides with the edge.
+
+00:26:17.813 --> 00:26:19.253
+So, we have to push it away from the edge,
+
+00:26:19.253 --> 00:26:21.777
+otherwise, it collides
+with one of the planes.
+
+00:26:21.777 --> 00:26:26.293
+And this way, the node can
+slide smoothly across the edge.
+
+00:26:28.643 --> 00:26:30.383
+Here we have a debug little from the game
+
+00:26:30.383 --> 00:26:32.273
+with the node going
+through a window corner
+
+00:26:32.273 --> 00:26:33.853
+with some fairly complex geometry.
+
+00:26:33.853 --> 00:26:37.460
+And the way this works is
+that we first try to estimate
+
+00:26:37.460 --> 00:26:41.300
+how the node might move during
+the upcoming solver step.
+
+00:26:41.300 --> 00:26:44.263
+Based on its current
+velocity, the direction.
+
+00:26:44.263 --> 00:26:46.573
+Individual neighboring
+nodes might be pulling it
+
+00:26:46.573 --> 00:26:50.603
+based on how much the closest
+key frame nodes have moved.
+
+00:26:50.603 --> 00:26:53.883
+And this gives us A-b-b around the node,
+
+00:26:53.883 --> 00:26:56.433
+and then we collect all
+the geometry in that A-b-b.
+
+00:26:57.373 --> 00:27:00.183
+And then, we try to be smart
+and distill these triangles
+
+00:27:00.183 --> 00:27:03.213
+into our limited collision constraint set.
+
+00:27:03.213 --> 00:27:04.903
+So, each triangle gives
+us a collision plane.
+
+00:27:04.903 --> 00:27:06.433
+And then we see if some of these planes
+
+00:27:06.433 --> 00:27:08.933
+are similar so we can merge them together.
+
+00:27:08.933 --> 00:27:12.083
+We did the convex edges and
+then using current position of
+
+00:27:12.083 --> 00:27:12.916
+the node,
+
+00:27:12.916 --> 00:27:15.713
+try to see which planes are
+more important than others,
+
+00:27:15.713 --> 00:27:18.883
+or which ones maybe, we can
+ignore completely because they
+
+00:27:18.883 --> 00:27:20.633
+are behind other planes, et cetera.
+
+00:27:22.067 --> 00:27:24.423
+Here's just a few examples of simple cases
+
+00:27:24.423 --> 00:27:26.233
+where this approach breaks down.
+
+00:27:26.233 --> 00:27:29.813
+So, we only have pairs of
+planes scraping a convex edge.
+
+00:27:29.813 --> 00:27:33.573
+We don't have a concept of group
+of convex planes like this,
+
+00:27:33.573 --> 00:27:36.123
+and it's not trivial to add
+this kind of concept into the
+
+00:27:36.123 --> 00:27:37.113
+solver.
+
+00:27:37.113 --> 00:27:39.323
+So in this case, if you have a node here,
+
+00:27:39.323 --> 00:27:41.523
+the plane n₃ will pull
+it on the wrong side
+
+00:27:41.523 --> 00:27:44.123
+of the collision and then n₁ and n₃
+
+00:27:44.123 --> 00:27:46.413
+starts to fight over the node.
+
+00:27:46.413 --> 00:27:47.246
+So in this case,
+
+00:27:47.246 --> 00:27:49.543
+the best thing to do is
+just to discard plane n₃,
+
+00:27:50.763 --> 00:27:53.953
+but it's much harder to do this call.
+
+00:27:53.953 --> 00:27:54.786
+To make this call.
+
+00:27:54.786 --> 00:27:55.843
+If the node is somewhere here,
+
+00:27:55.843 --> 00:27:58.173
+because if it ends up moving to the left,
+
+00:27:58.173 --> 00:28:00.103
+it will collide with
+the plane n₂ like this,
+
+00:28:00.103 --> 00:28:02.353
+and create what's called
+the ghost collision.
+
+00:28:03.373 --> 00:28:05.773
+And here is another simple example.
+
+00:28:05.773 --> 00:28:07.970
+So, plane n₁ here doesn't
+have any convex edge.
+
+00:28:07.970 --> 00:28:10.963
+So, it forks as an infinite plane.
+
+00:28:10.963 --> 00:28:13.613
+And again, it can create a
+ghost collision like this.
+
+00:28:14.869 --> 00:28:18.698
+A lot of effort went into
+this heuristics of compiling
+
+00:28:18.698 --> 00:28:21.763
+complex geometry into
+limited set of constraints
+
+00:28:21.763 --> 00:28:24.075
+for each node and trying to make it work
+
+00:28:24.075 --> 00:28:25.433
+as robustly as possible.
+
+00:28:25.433 --> 00:28:28.073
+And it never got totally robust.
+
+00:28:28.073 --> 00:28:30.548
+Sometimes our geometry is very complex
+
+00:28:30.548 --> 00:28:34.293
+and the rope needs to
+slide across it very fast.
+
+00:28:36.293 --> 00:28:38.553
+So, this really here was the crux
+
+00:28:38.553 --> 00:28:40.473
+of the Dynamic Rope Simulation.
+
+00:28:40.473 --> 00:28:43.493
+Fortunately, in Last of Us 2,
+the area where the rope can be
+
+00:28:43.493 --> 00:28:45.953
+deployed is limited by the
+fact that one end of the rope
+
+00:28:45.953 --> 00:28:47.973
+is always anchored somewhere.
+
+00:28:47.973 --> 00:28:48.806
+So in the end,
+
+00:28:48.806 --> 00:28:51.193
+we just had to test these areas properly,
+
+00:28:51.193 --> 00:28:54.313
+and go and clean up the
+show in problematic places.
+
+00:28:54.313 --> 00:28:56.077
+Also, we have a system that allows us
+
+00:28:56.077 --> 00:28:59.223
+to take collision triangles
+to either ignore rope
+
+00:28:59.223 --> 00:29:01.523
+or to ignore everything but the rope.
+
+00:29:01.523 --> 00:29:03.903
+So, we can create special
+layer of collision,
+
+00:29:03.903 --> 00:29:06.113
+of clean collision, just for the rope.
+
+00:29:06.113 --> 00:29:08.363
+If that's needed for some places.
+
+00:29:09.783 --> 00:29:11.453
+Shipping a game where you
+can do this with a rope,
+
+00:29:11.453 --> 00:29:13.953
+anywhere in your level
+would be much, much harder.
+
+00:29:15.373 --> 00:29:18.153
+And so, before we finish
+the Dynamic Rope part,
+
+00:29:18.153 --> 00:29:20.473
+I just want to show
+you a few useful tricks
+
+00:29:20.473 --> 00:29:22.453
+you can do with collision constraints.
+
+00:29:22.453 --> 00:29:24.233
+So, before you send
+them off to the solver,
+
+00:29:24.233 --> 00:29:26.793
+you can look at them, and
+see if there is something
+
+00:29:26.793 --> 00:29:29.463
+suspicious about them
+that could cause issues.
+
+00:29:29.463 --> 00:29:31.333
+Here, we have a node with
+two collision planes.
+
+00:29:31.333 --> 00:29:34.233
+The orange is normal;
+indicates the positive side.
+
+00:29:34.233 --> 00:29:37.376
+So the node is basically
+trapped between the planes.
+
+00:29:37.376 --> 00:29:40.494
+And this would usually happen
+when some prop or character
+
+00:29:40.494 --> 00:29:43.953
+collision would animate
+into static collision.
+
+00:29:43.953 --> 00:29:46.513
+Most often, from Ellie's tie or torso,
+
+00:29:46.513 --> 00:29:49.043
+and it's important for us to
+never let the rope clip into
+
+00:29:49.043 --> 00:29:49.876
+the static collision.
+
+00:29:49.876 --> 00:29:52.453
+We don't care that much
+about the character capsules.
+
+00:29:52.453 --> 00:29:54.623
+So, let's say the black
+plane is the important one
+
+00:29:54.623 --> 00:29:56.523
+and the purple, less important.
+
+00:29:57.923 --> 00:29:59.563
+So, first, we'll project the node out
+
+00:29:59.563 --> 00:30:00.033
+of the black collision,
+
+00:30:08.543 --> 00:30:10.513
+This pinching prevention is pretty common
+
+00:30:10.513 --> 00:30:12.193
+in clothes simulations, I think.
+
+00:30:15.433 --> 00:30:17.993
+There's another useful trick
+you can do during constraint
+
+00:30:17.993 --> 00:30:19.533
+pre-processing.
+
+00:30:19.533 --> 00:30:21.533
+I'm going to show you the problem first.
+
+00:30:22.601 --> 00:30:25.653
+It was mostly affecting weapon
+straps because characters
+
+00:30:25.653 --> 00:30:28.443
+can sometimes animate their
+hands through collision.
+
+00:30:28.443 --> 00:30:31.553
+And if they're handling a
+baton that has strap on it,
+
+00:30:31.553 --> 00:30:34.333
+it can get stuck on a
+collision and stretch out.
+
+00:30:35.943 --> 00:30:38.063
+It could get pretty severe.
+
+00:30:39.973 --> 00:30:43.243
+I've seen weapons straps
+off from enemy weapons
+
+00:30:43.243 --> 00:30:46.313
+stretched across the
+whole level a few times.
+
+00:30:46.313 --> 00:30:48.963
+Fortunately, there is a
+simple trick to prevent that.
+
+00:30:50.483 --> 00:30:53.663
+Here we have a piece of
+rope with four nodes.
+
+00:30:53.663 --> 00:30:56.013
+The yellow node 0 is key framed.
+
+00:30:56.013 --> 00:30:57.223
+And we know the length of the rope
+
+00:30:57.223 --> 00:30:58.583
+between node 0 and 3.
+
+00:30:59.443 --> 00:31:03.553
+And here we have a collision
+constraint for the node 3.
+
+00:31:03.553 --> 00:31:05.853
+And we can just measure
+the distance of this plane
+
+00:31:05.853 --> 00:31:07.813
+from the keyframed node.
+
+00:31:07.813 --> 00:31:11.473
+And if it's bigger than
+the length of the rope,
+
+00:31:11.473 --> 00:31:14.539
+then we know this plane
+will stretch out the rope,
+
+00:31:14.539 --> 00:31:16.533
+and we can just ignore this plane.
+
+00:31:18.543 --> 00:31:20.163
+It's very simple but effective.
+
+00:31:21.323 --> 00:31:22.223
+Here's the result.
+
+00:31:25.776 --> 00:31:28.253
+You can see how the
+constraints are being removed
+
+00:31:28.253 --> 00:31:30.353
+as the strap starts to stretch.
+
+00:31:35.153 --> 00:31:35.986
+Okay.
+
+00:31:35.986 --> 00:31:38.223
+So now, we will jump
+straight into the third part
+
+00:31:38.223 --> 00:31:39.913
+of this talk, which is going to be about
+
+00:31:39.913 --> 00:31:41.933
+the Taut Rope Simulation.
+
+00:31:41.933 --> 00:31:45.153
+And as a reminder, this
+video shows what we're after.
+
+00:31:45.153 --> 00:31:48.033
+So, it's just a line that's
+able to collide with collision
+
+00:31:48.033 --> 00:31:51.853
+and wrap around it, and
+slide along the edges
+
+00:31:51.853 --> 00:31:55.213
+to maintain the shortest
+distance between the end points.
+
+00:31:55.213 --> 00:31:57.533
+The collision needs to
+be fully continuous.
+
+00:31:57.533 --> 00:31:59.953
+So, no matter how fast
+the end points of the rope
+
+00:31:59.953 --> 00:32:02.463
+are moving, or how 10
+other collision features,
+
+00:32:03.533 --> 00:32:05.903
+it never clips through the collision.
+
+00:32:05.903 --> 00:32:09.334
+And surprisingly, I didn't
+find any previous work
+
+00:32:09.334 --> 00:32:11.273
+on something similar.
+
+00:32:11.273 --> 00:32:13.753
+So, I'm just going to show
+you the approach that we took.
+
+00:32:14.883 --> 00:32:17.303
+So, we start with this simple case.
+
+00:32:17.303 --> 00:32:19.933
+We have just a straight line segment A-B.
+
+00:32:19.933 --> 00:32:21.733
+The game tells us that on the next frame,
+
+00:32:21.733 --> 00:32:25.443
+the end points A-B have to
+move to these new positions.
+
+00:32:25.443 --> 00:32:26.863
+So, that's our first movement phase.
+
+00:32:26.863 --> 00:32:28.863
+That's where we want the points to move.
+
+00:32:29.723 --> 00:32:32.603
+And next, we need to check for collisions.
+
+00:32:32.603 --> 00:32:35.773
+And we do that by always moving
+just one point at a time.
+
+00:32:35.773 --> 00:32:39.993
+So first, we move point A
+and keep the point B fixed.
+
+00:32:39.993 --> 00:32:42.856
+And during that movement,
+this line segment will sweep
+
+00:32:42.856 --> 00:32:45.243
+this green triangle.
+
+00:32:45.243 --> 00:32:47.733
+So, we just need to check for
+intersection of this triangle
+
+00:32:47.733 --> 00:32:50.724
+with any neighboring convex edges.
+
+00:32:50.724 --> 00:32:52.883
+There is no collision here.
+
+00:32:52.883 --> 00:32:54.383
+So, the point A can move.
+
+00:32:54.383 --> 00:32:56.533
+And then, the middle is for point B.
+
+00:32:56.533 --> 00:32:57.983
+And here the triangle intersects
+
+00:32:57.983 --> 00:33:00.093
+with the blue convex edge.
+
+00:33:00.093 --> 00:33:02.743
+And the intersection point
+is the point of contact.
+
+00:33:02.743 --> 00:33:07.053
+So we only let the point B move
+up until the contact point.
+
+00:33:07.053 --> 00:33:10.428
+And we enter new edge point
+into the rope and we can call it
+
+00:33:10.428 --> 00:33:11.343
+point C.
+
+00:33:12.373 --> 00:33:16.595
+And since this collision
+face found a contact,
+
+00:33:16.595 --> 00:33:19.303
+we have to be able to
+terminate a collision phase.
+
+00:33:19.303 --> 00:33:21.753
+And we go back to another movement phase.
+
+00:33:21.753 --> 00:33:24.773
+And the point B still has
+not reached the target point.
+
+00:33:24.773 --> 00:33:27.223
+So, that will be the new
+movement for that point.
+
+00:33:28.613 --> 00:33:31.043
+And I'm going to move the
+camera so that you can hopefully
+
+00:33:31.043 --> 00:33:32.953
+see better next steps.
+
+00:33:32.953 --> 00:33:34.193
+So from this angle,
+
+00:33:34.193 --> 00:33:36.473
+you can see that the rope
+is not straightened up,
+
+00:33:36.473 --> 00:33:39.083
+and we will want to let
+the point C slide down
+
+00:33:39.083 --> 00:33:42.216
+along the collision edge
+to straighten up the rope.
+
+00:33:42.216 --> 00:33:45.393
+Now, how do we find out
+how far it should slide?
+
+00:33:45.393 --> 00:33:48.113
+So here we are, looking
+along the edge and rA, rB
+
+00:33:48.113 --> 00:33:51.033
+are perpendicular distances
+of the points from the edge.
+
+00:33:52.493 --> 00:33:55.501
+And we can rotate point A into the plane
+
+00:33:55.501 --> 00:33:58.333
+where the edge and the point B are.
+
+00:33:59.433 --> 00:34:01.733
+And here, we are looking onto the plane.
+
+00:34:01.733 --> 00:34:04.473
+Here, we can just draw
+the straight line between
+
+00:34:04.473 --> 00:34:07.373
+the point B and A line
+to find the intersection
+
+00:34:07.373 --> 00:34:08.483
+with the edge.
+
+00:34:08.483 --> 00:34:10.733
+And that's where we want
+the point C to move.
+
+00:34:11.903 --> 00:34:13.513
+And if you go back to the 3D view,
+
+00:34:13.513 --> 00:34:16.878
+so now, we know how far
+we want to let the point C
+
+00:34:16.878 --> 00:34:19.403
+slide along the edge.
+
+00:34:19.403 --> 00:34:21.949
+But this was just a movement phase.
+
+00:34:21.949 --> 00:34:25.643
+So now, we know where we
+want points B and C to go,
+
+00:34:27.143 --> 00:34:29.899
+and we need to go to do
+another collision phase
+
+00:34:29.899 --> 00:34:32.543
+to check if we actually can get there.
+
+00:34:32.543 --> 00:34:34.623
+And we do it again by
+moving points one by one.
+
+00:34:34.623 --> 00:34:36.303
+So first, we move point C,
+
+00:34:36.303 --> 00:34:39.223
+and we need to check for
+intersection of edges with these
+
+00:34:39.223 --> 00:34:40.843
+two triangles.
+
+00:34:40.843 --> 00:34:41.676
+It's all good.
+
+00:34:41.676 --> 00:34:43.853
+And then we check this
+triangle for point B.
+
+00:34:45.343 --> 00:34:47.223
+No collision here.
+
+00:34:47.223 --> 00:34:49.655
+And since this collision phase
+ended with no new contact
+
+00:34:49.655 --> 00:34:53.043
+we are done, and this is the
+final position of the rope.
+
+00:34:53.043 --> 00:34:55.353
+So, this is the core of the algorithm.
+
+00:34:55.353 --> 00:34:58.853
+We are alternating these
+movement and collision phases.
+
+00:34:58.853 --> 00:35:00.033
+Movement phase tells us where
+we want points on the rope
+
+00:35:01.843 --> 00:35:03.043
+to move.
+
+00:35:03.043 --> 00:35:05.933
+And then, the collision
+phase checks for collisions.
+
+00:35:05.933 --> 00:35:07.193
+And if there is a collision,
+
+00:35:07.193 --> 00:35:09.903
+we have to go back to another
+movement phase to generate new
+
+00:35:09.903 --> 00:35:11.363
+target positions, et cetera.
+
+00:35:12.293 --> 00:35:15.133
+And if the collision phase
+reports no new contacts,
+
+00:35:15.133 --> 00:35:16.143
+then we are done.
+
+00:35:18.983 --> 00:35:21.513
+I'm going to show you one
+more example to explain better
+
+00:35:21.513 --> 00:35:23.063
+the movement phase.
+
+00:35:23.063 --> 00:35:25.963
+So, here we have a rope that
+has two edge points already.
+
+00:35:27.138 --> 00:35:30.553
+And now the game tells us that
+the end points have to move
+
+00:35:30.553 --> 00:35:32.363
+to these new positions.
+
+00:35:32.363 --> 00:35:34.943
+And it's not obvious how we
+should directly calculate
+
+00:35:34.943 --> 00:35:36.733
+how far should the two middle points,
+
+00:35:36.733 --> 00:35:40.773
+B and C move along their edges
+to straighten up the rope.
+
+00:35:40.773 --> 00:35:44.003
+So, we will only use the
+first three points A, B, C.
+
+00:35:44.003 --> 00:35:46.253
+to find out where the point B should move
+
+00:35:46.253 --> 00:35:48.963
+to straighten up the segment A, B, C.
+
+00:35:48.963 --> 00:35:51.443
+Then we do the same for the B, C, D.
+
+00:35:51.443 --> 00:35:53.403
+to the move the point C.
+
+00:35:53.403 --> 00:35:57.779
+And then, we keep doing that
+until we find a position
+
+00:35:57.779 --> 00:36:01.163
+where the rope is straighten
+up or as straight as it can go,
+
+00:36:01.163 --> 00:36:03.073
+given the collision edges.
+
+00:36:03.073 --> 00:36:05.523
+So, the movement phase
+is an iterative process.
+
+00:36:06.723 --> 00:36:09.023
+And there's also just one movement phase.
+
+00:36:09.023 --> 00:36:12.753
+So, as long as each point
+on the rope is moving along
+
+00:36:12.753 --> 00:36:15.333
+the same edge and
+doesn't change direction.
+
+00:36:15.333 --> 00:36:17.063
+You can keep iterating
+and they'll be fine.
+
+00:36:17.063 --> 00:36:20.873
+The target position that
+straightens up the rope.
+
+00:36:20.873 --> 00:36:23.654
+And now we would have to go
+back before the collision phase
+
+00:36:23.654 --> 00:36:26.133
+to actually check if we can get there.
+
+00:36:28.873 --> 00:36:30.983
+So, there's one problem with
+this iterative advancement
+
+00:36:30.983 --> 00:36:32.173
+of rope edge points.
+
+00:36:33.083 --> 00:36:35.633
+I'm going to show it on
+this piece of geometry.
+
+00:36:35.633 --> 00:36:37.823
+So now, the upper point
+has moved to the right,
+
+00:36:37.823 --> 00:36:40.693
+and now, we need to slide
+all these edge points along
+
+00:36:40.693 --> 00:36:42.093
+their edges.
+
+00:36:42.093 --> 00:36:44.473
+But as the edges are getting
+closer and closer together.
+
+00:36:44.473 --> 00:36:46.733
+The iterative method is getting
+less and less effective,
+
+00:36:46.733 --> 00:36:50.213
+until the points pretty much
+stop advancing completely.
+
+00:36:50.213 --> 00:36:52.413
+Fortunately, that is a nice
+way to deal with this problem,
+
+00:36:52.413 --> 00:36:55.353
+since you can basically
+unroll it all into 2D,
+
+00:36:55.353 --> 00:36:56.553
+and solve it in a plane.
+
+00:36:57.533 --> 00:36:59.381
+So, as you go along the rope,
+
+00:36:59.381 --> 00:37:03.533
+as long as two consecutive
+edges are lying in a plane,
+
+00:37:03.533 --> 00:37:06.203
+you can keep unrolling
+onto the same 2D plane.
+
+00:37:06.203 --> 00:37:08.283
+So here, we start with edges A and B,
+
+00:37:08.283 --> 00:37:10.203
+and their plane will be our drawing plane
+
+00:37:10.203 --> 00:37:11.773
+on the right.
+
+00:37:11.773 --> 00:37:14.723
+And first, we bring the
+point P₀ into this plane
+
+00:37:14.723 --> 00:37:16.453
+by rotating it around edge A.
+
+00:37:17.663 --> 00:37:20.243
+And then, since B and C
+are parallel to each other,
+
+00:37:20.243 --> 00:37:22.793
+we can bring edge E into this plane also
+
+00:37:22.793 --> 00:37:25.406
+by rotating it around edge B.
+
+00:37:25.406 --> 00:37:28.293
+And then, we do the same for D and E.
+
+00:37:28.293 --> 00:37:31.083
+And in the end, we also bring
+point P₁ into this plane
+
+00:37:31.083 --> 00:37:32.733
+by rotating it around edge E.
+
+00:37:33.843 --> 00:37:36.313
+And so, once we have
+all this in one plane,
+
+00:37:36.313 --> 00:37:39.073
+we can just draw a straight
+line between P₀ and P₁.
+
+00:37:39.913 --> 00:37:42.603
+And in 2D, it's easy to
+find these intersections.
+
+00:37:42.603 --> 00:37:44.323
+And then we bring it back into 3D.
+
+00:37:44.323 --> 00:37:46.003
+As we can see on the left side.
+
+00:37:46.933 --> 00:37:49.863
+So, only case when you can't
+use this trick is when two
+
+00:37:49.863 --> 00:37:52.563
+consecutive edges on the
+rope are askew lines.
+
+00:37:52.563 --> 00:37:56.263
+In this case, you still need
+to use the iterative method.
+
+00:37:58.763 --> 00:38:01.183
+Okay. So that wasn't that bad.
+
+00:38:01.183 --> 00:38:02.913
+It gets worse when we
+have to start dealing
+
+00:38:02.913 --> 00:38:05.093
+with intersection of edges.
+
+00:38:05.093 --> 00:38:08.533
+So here, we have this a
+rather ugly piece of geometry,
+
+00:38:08.533 --> 00:38:12.093
+but it will serve us as a
+good showcase to demonstrate
+
+00:38:12.093 --> 00:38:14.923
+how to deal with edge intersections.
+
+00:38:14.923 --> 00:38:16.323
+So, our rope has one edge point.
+
+00:38:16.323 --> 00:38:18.539
+And as the end points are
+moving, it slides along
+
+00:38:18.539 --> 00:38:21.443
+the edge until our
+collision phase reports that
+
+00:38:21.443 --> 00:38:23.913
+we hit some collision at this point.
+
+00:38:23.913 --> 00:38:24.763
+And here,
+
+00:38:24.763 --> 00:38:27.743
+the important thing here is
+that our collision detection
+
+00:38:27.743 --> 00:38:31.053
+algorithm has to be able to
+report all the edges that come
+
+00:38:31.053 --> 00:38:33.153
+together at this intersection point.
+
+00:38:33.993 --> 00:38:35.663
+So, we don't want just the first edge,
+
+00:38:35.663 --> 00:38:38.653
+or numerically, the first
+edge that the rope hits.
+
+00:38:38.653 --> 00:38:39.696
+We want to be able to gather all the edges
+
+00:38:39.696 --> 00:38:43.623
+within some tolerance
+of the final position.
+
+00:38:44.673 --> 00:38:45.506
+And this kind of numerical robustness
+
+00:38:45.506 --> 00:38:49.263
+is important part of the
+whole Taut Rope Simulation.
+
+00:38:49.263 --> 00:38:51.063
+I'll talk about it later a bit more.
+
+00:38:52.143 --> 00:38:54.583
+Okay. So, we have this point on the rope
+
+00:38:54.583 --> 00:38:57.113
+that's at intersection
+of five different edges.
+
+00:38:57.113 --> 00:38:58.913
+Now, what should happen next, right?
+
+00:39:00.303 --> 00:39:01.136
+Should...
+
+00:39:01.136 --> 00:39:02.123
+What is the point supposed to do?
+
+00:39:02.123 --> 00:39:04.303
+Should it slide along
+some of the other edges,
+
+00:39:04.303 --> 00:39:06.493
+or should it stay in the intersection?
+
+00:39:07.383 --> 00:39:09.753
+So, to make it easier to reason about it,
+
+00:39:09.753 --> 00:39:14.103
+what we do is that we evaluate
+all the pairs of two edges.
+
+00:39:14.103 --> 00:39:16.783
+So, we always only look
+at two edges at a time,
+
+00:39:16.783 --> 00:39:19.433
+and we try to decide
+what that intersection
+
+00:39:19.433 --> 00:39:21.143
+of two edges means.
+
+00:39:21.143 --> 00:39:23.533
+And then, we put it together at the end.
+
+00:39:23.533 --> 00:39:26.143
+So, before I can explain that better,
+
+00:39:26.143 --> 00:39:29.913
+we need to establish some
+orientation for the rope.
+
+00:39:29.913 --> 00:39:32.643
+So, we choose one end of
+the rope to be the origin
+
+00:39:32.643 --> 00:39:34.023
+or the beginning.
+
+00:39:34.023 --> 00:39:36.673
+And we, we establish the orientation.
+
+00:39:36.673 --> 00:39:39.863
+That it starts at the origin
+and points toward the back.
+
+00:39:39.863 --> 00:39:41.383
+Toward the end, like that.
+
+00:39:42.455 --> 00:39:44.403
+And you also need an
+orientation for the edges.
+
+00:39:44.403 --> 00:39:46.893
+So, we'll establish the
+orientation like this.
+
+00:39:47.893 --> 00:39:51.273
+Which basically, means that if
+you're standing on the phase
+
+00:39:51.273 --> 00:39:54.463
+that's facing the, the origin of the rope,
+
+00:39:54.463 --> 00:39:56.617
+that's the upper phase here,
+
+00:39:56.617 --> 00:40:00.033
+and you're looking along the
+positive direction of the edge,
+
+00:40:00.613 --> 00:40:04.293
+then the rope has to pass the
+edge on the right-hand side.
+
+00:40:04.293 --> 00:40:05.883
+Okay?
+
+00:40:05.883 --> 00:40:09.813
+Now, as I was saying, we
+will be always evaluating
+
+00:40:09.813 --> 00:40:10.793
+one pair of edges.
+
+00:40:10.793 --> 00:40:13.123
+So here, we have two edges: A and B.
+
+00:40:13.123 --> 00:40:15.193
+And we found a plane in
+which, these two edges slide.
+
+00:40:15.193 --> 00:40:16.763
+And that will be our drawing plane now.
+
+00:40:16.763 --> 00:40:20.213
+And we orient this plane in
+a way that the rope is going
+
+00:40:20.213 --> 00:40:22.733
+from our side into the plane.
+
+00:40:22.733 --> 00:40:26.743
+So, I can draw the rope
+crossing the plane like this.
+
+00:40:26.743 --> 00:40:29.023
+And we also have the
+orientation of these two edges.
+
+00:40:29.023 --> 00:40:30.043
+And according to our rule,
+
+00:40:30.043 --> 00:40:32.083
+the rope has to pass
+on the right-hand side
+
+00:40:32.083 --> 00:40:34.103
+of each of these edges.
+
+00:40:34.103 --> 00:40:37.163
+So, I know that the rope
+has to be somewhere here.
+
+00:40:37.163 --> 00:40:38.109
+Okay?
+
+00:40:38.109 --> 00:40:41.733
+On the right-hand side of A,
+and the right-hand side of B.
+
+00:40:43.263 --> 00:40:45.743
+And I drew the of edges
+as line that are crossing
+
+00:40:45.743 --> 00:40:47.203
+each other, but in fact,
+
+00:40:47.203 --> 00:40:50.093
+they should either start
+or end at the intersection.
+
+00:40:50.093 --> 00:40:51.533
+Otherwise, you will
+have, like, a T-junction
+
+00:40:51.533 --> 00:40:53.643
+in the collision mesh, and
+you're not going to worry
+
+00:40:53.643 --> 00:40:55.079
+about that case.
+
+00:40:55.079 --> 00:40:58.104
+So, depending on which edge starts or ends
+
+00:40:58.104 --> 00:41:01.613
+at the intersection, we
+will have different cases.
+
+00:41:01.613 --> 00:41:03.463
+And the first case will be like this.
+
+00:41:04.763 --> 00:41:08.403
+And in 3D it would usually
+look something like this.
+
+00:41:08.403 --> 00:41:11.044
+So, I call this case Inner
+Corner because it's like a corner
+
+00:41:11.044 --> 00:41:13.253
+where the rope can get caught, basically.
+
+00:41:14.293 --> 00:41:17.057
+And next thing we do is,
+considering where the previous
+
+00:41:17.057 --> 00:41:19.112
+and next point on the
+rope are, we evaluate
+
+00:41:19.112 --> 00:41:23.383
+in which direction would the
+rope slide along each edge,
+
+00:41:23.383 --> 00:41:25.283
+if we would only have that edge alone.
+
+00:41:26.273 --> 00:41:28.773
+So, we evaluate it first for edge A
+
+00:41:28.773 --> 00:41:30.323
+and then we do that for edge B.
+
+00:41:31.473 --> 00:41:34.783
+And different combinations of
+these directions will give us
+
+00:41:34.783 --> 00:41:37.543
+different sub-cases for the Inner Corner.
+
+00:41:37.543 --> 00:41:41.283
+So, this sub-case basically
+means the rope is trying to move
+
+00:41:41.283 --> 00:41:44.653
+into the corner, and I call
+it Stable Inner Corner.
+
+00:41:44.653 --> 00:41:48.163
+And that's the case when the
+rope stays at the intersection.
+
+00:41:49.523 --> 00:41:51.255
+And this one,
+
+00:41:51.255 --> 00:41:55.053
+this sub-case means that the
+rope is a abandoning edge B,
+
+00:41:55.053 --> 00:41:57.713
+and it's moving or sliding along edge A
+
+00:41:57.713 --> 00:41:59.583
+out of the intersection.
+
+00:41:59.583 --> 00:42:01.213
+So, I call it Move Along A,
+
+00:42:01.213 --> 00:42:02.813
+and this would be Move Along B.
+
+00:42:04.393 --> 00:42:05.273
+And here.
+
+00:42:05.273 --> 00:42:07.083
+Here, we have this other case.
+
+00:42:07.083 --> 00:42:10.793
+And in 3D it would look
+usually something like this.
+
+00:42:10.793 --> 00:42:12.797
+So, I call it Unstable Corner.
+
+00:42:12.797 --> 00:42:15.739
+And depending on which way we would...
+
+00:42:15.739 --> 00:42:19.113
+Which way would the rope
+slide along each edge,
+
+00:42:19.113 --> 00:42:20.573
+we have this sub-case.
+
+00:42:22.073 --> 00:42:24.933
+Which, you can basically
+choose A or B because the rope
+
+00:42:24.933 --> 00:42:27.483
+is on the vertex, basically,
+and can go either way.
+
+00:42:29.013 --> 00:42:31.903
+And then, we have a Move
+Along A or Move Along B.
+
+00:42:33.773 --> 00:42:35.253
+And then, we have this case.
+
+00:42:35.253 --> 00:42:36.733
+Where, if you think about it,
+
+00:42:36.733 --> 00:42:40.123
+the rope needs to be
+on the right side of B,
+
+00:42:40.123 --> 00:42:42.053
+but the edge A will
+not to let it go there.
+
+00:42:42.053 --> 00:42:44.583
+So, you can basically
+disregard the edge B.
+
+00:42:45.613 --> 00:42:48.413
+In 3D, it would often
+look something like this.
+
+00:42:48.413 --> 00:42:51.143
+So the edge B is basically
+coming from the side,
+
+00:42:51.143 --> 00:42:53.713
+but the rope can't
+really interact with it.
+
+00:42:53.713 --> 00:42:55.743
+I call this case Side Edge.
+
+00:42:55.743 --> 00:42:57.573
+I had to invent some
+names for these cases.
+
+00:42:57.573 --> 00:43:01.943
+So, I can reason about them
+and write a code for them.
+
+00:43:01.943 --> 00:43:06.943
+And the sub-cases would be
+either Ignore B or Ignore A,
+
+00:43:07.445 --> 00:43:08.883
+in this other case.
+
+00:43:10.553 --> 00:43:11.386
+Okay.
+
+00:43:11.386 --> 00:43:12.533
+So, we're not done yet.
+
+00:43:12.533 --> 00:43:15.803
+So, bear with me for a little
+longer through this section.
+
+00:43:15.803 --> 00:43:19.633
+The rope can cross the
+plane of the edges twice.
+
+00:43:19.633 --> 00:43:22.453
+So, it comes from the origin,
+it goes into the plane,
+
+00:43:22.453 --> 00:43:24.069
+and it comes back again.
+
+00:43:24.069 --> 00:43:27.263
+Geometrically, since the
+rope is at the intersection,
+
+00:43:27.263 --> 00:43:30.533
+it really just touches the
+plane at the intersection point.
+
+00:43:30.533 --> 00:43:32.735
+But from topological standpoint,
+it goes into the plane,
+
+00:43:32.735 --> 00:43:36.073
+crosses the two edges, and comes back.
+
+00:43:36.073 --> 00:43:37.043
+And when it comes back,
+
+00:43:37.043 --> 00:43:39.783
+you'd have to be on the left-hand
+side of each of the edges
+
+00:43:39.783 --> 00:43:41.853
+for the same reason that it had
+to be on the right-hand side
+
+00:43:41.853 --> 00:43:42.686
+when going in.
+
+00:43:43.693 --> 00:43:45.073
+Um.
+
+00:43:45.073 --> 00:43:47.423
+So now, let's look at
+what segments of the edges
+
+00:43:47.423 --> 00:43:48.963
+are we dealing with,
+because that will give us
+
+00:43:48.963 --> 00:43:50.483
+different cases again.
+
+00:43:50.483 --> 00:43:53.213
+So first, let's consider this case.
+
+00:43:53.213 --> 00:43:55.913
+And maybe this corresponding
+3D sketch will make it
+
+00:43:55.913 --> 00:43:58.543
+more obvious what's going on here.
+
+00:43:58.543 --> 00:44:01.193
+So basically, the rope was
+going over the two edges,
+
+00:44:01.193 --> 00:44:03.185
+and now it's slid onto the corner.
+
+00:44:03.185 --> 00:44:05.393
+And it's about to slide off.
+
+00:44:05.393 --> 00:44:07.593
+Or maybe not, it depends
+on the other edges
+
+00:44:07.593 --> 00:44:09.373
+coming into intersection.
+
+00:44:09.373 --> 00:44:12.723
+But for now, we're only
+thinking about these two edges.
+
+00:44:13.563 --> 00:44:16.333
+I call this case Outer Corner.
+
+00:44:16.333 --> 00:44:19.143
+And the sub-cases are either
+
+00:44:19.143 --> 00:44:21.393
+the rope goes over A and then B,
+
+00:44:21.393 --> 00:44:23.043
+or first over B and then A.
+
+00:44:24.183 --> 00:44:26.863
+And finally, this last case,
+
+00:44:26.863 --> 00:44:27.696
+or this one.
+
+00:44:27.696 --> 00:44:30.603
+Those are the actual cases, basically.
+
+00:44:30.603 --> 00:44:32.413
+And in theory, it will
+be something like this.
+
+00:44:32.413 --> 00:44:36.313
+So, the edges would have to be
+like, relatively sharp edges
+
+00:44:36.313 --> 00:44:38.973
+so that the rope can
+go over them like that.
+
+00:44:38.973 --> 00:44:41.093
+And depending on which way the rope
+
+00:44:41.093 --> 00:44:43.653
+wants to slide along each edge,
+
+00:44:43.653 --> 00:44:45.403
+we have these sub-cases,
+
+00:44:45.403 --> 00:44:47.603
+which are equivalent to
+what you already saw before.
+
+00:44:47.603 --> 00:44:49.413
+So, we have a Stable Inner Corner,
+
+00:44:49.413 --> 00:44:51.893
+or Inner Corner Move
+Along A, and Move Along B,
+
+00:44:51.893 --> 00:44:54.313
+or we can have also, Unstable Corner.
+
+00:44:55.523 --> 00:44:56.356
+Okay.
+
+00:44:56.356 --> 00:44:59.843
+So now, equipped with all these
+topological categorization,
+
+00:44:59.843 --> 00:45:00.033
+we can look at our test case.
+
+00:45:06.673 --> 00:45:10.193
+So, we have these five
+intersecting edges here,
+
+00:45:10.193 --> 00:45:12.803
+and we'll call them A, B, C, D, E.
+
+00:45:12.803 --> 00:45:14.913
+And we found out with what
+their orientations are.
+
+00:45:14.913 --> 00:45:16.693
+And then, we have already
+the topological case
+
+00:45:16.693 --> 00:45:18.883
+for each pair of the two edges.
+
+00:45:18.883 --> 00:45:21.902
+And we'll get, we'll get
+this kind of metrics here.
+
+00:45:21.902 --> 00:45:24.844
+And first, we look for
+some Side Edge cases,
+
+00:45:24.844 --> 00:45:27.643
+and we see that B and E are Side Edges.
+
+00:45:27.643 --> 00:45:30.043
+So, we can ignore these edges.
+
+00:45:30.043 --> 00:45:32.923
+And now we only have A, C, D left.
+
+00:45:32.923 --> 00:45:35.683
+And we see that there is an Inner Corner,
+
+00:45:35.683 --> 00:45:38.723
+Stable Inner Corner between A-C and A-D.
+
+00:45:38.723 --> 00:45:40.265
+And if there is any Stable Inner Corner,
+
+00:45:40.265 --> 00:45:42.593
+it means that the rope
+is caught in the corner
+
+00:45:42.593 --> 00:45:43.733
+and stays there.
+
+00:45:43.733 --> 00:45:46.653
+So, we just keep the rope
+point at the intersection.
+
+00:45:46.653 --> 00:45:49.943
+But the end points of the
+rope will keep moving now.
+
+00:45:49.943 --> 00:45:51.583
+So, they move just a little bit,
+
+00:45:51.583 --> 00:45:54.033
+but the situation has changed slightly.
+
+00:45:54.033 --> 00:45:56.272
+So we have new metrics here.
+
+00:45:56.272 --> 00:45:59.363
+The edges E and B switched orientation,
+
+00:45:59.363 --> 00:46:01.663
+but they are still Side Edges.
+
+00:46:01.663 --> 00:46:03.893
+So, we can still ignore them.
+
+00:46:03.893 --> 00:46:06.253
+And it is no more Stable Inner Corner.
+
+00:46:06.253 --> 00:46:07.933
+So, the rope should move out now.
+
+00:46:07.933 --> 00:46:10.503
+And instead, we have
+Inner Corner Move Along C,
+
+00:46:10.503 --> 00:46:12.163
+and Inner Corner Move Along D.
+
+00:46:12.163 --> 00:46:13.933
+So we know we will abandon edge A.
+
+00:46:14.853 --> 00:46:18.903
+And then also, edges C and D
+create an Outer Corner C-D.
+
+00:46:18.903 --> 00:46:22.913
+So, we will want to split the
+rope point into two points.
+
+00:46:22.913 --> 00:46:24.243
+First, will go along edge C.
+
+00:46:24.243 --> 00:46:25.893
+And second, will go along edge D.
+
+00:46:27.333 --> 00:46:29.003
+So, here it goes.
+
+00:46:32.353 --> 00:46:34.873
+And then, we can go back
+and it would be basically
+
+00:46:34.873 --> 00:46:37.323
+the same thing but in reverse.
+
+00:46:37.323 --> 00:46:40.223
+So, at certain point, the two,
+
+00:46:40.223 --> 00:46:42.783
+the two rope points will
+get within some tolerance
+
+00:46:42.783 --> 00:46:44.953
+from each other, and we will
+merge them into one point.
+
+00:46:44.953 --> 00:46:47.403
+And then, we will reach the intersection,
+
+00:46:47.403 --> 00:46:49.283
+spend a while in the Stable Inner Corner,
+
+00:46:49.283 --> 00:46:52.023
+and then, Move Along A out of the corner.
+
+00:46:53.783 --> 00:46:56.623
+But even just for this
+case of each intersection,
+
+00:46:56.623 --> 00:46:59.341
+the situation can change
+dramatically depending on what
+
+00:46:59.341 --> 00:47:01.533
+the end points of the rope are doing.
+
+00:47:01.533 --> 00:47:05.653
+So just for illustration,
+if rope ends go like this,
+
+00:47:05.653 --> 00:47:09.023
+then suddenly, edges A
+and B are now forming
+
+00:47:09.023 --> 00:47:10.133
+an Outer Corner.
+
+00:47:13.683 --> 00:47:17.193
+And then, you can do this,
+which is pretty common.
+
+00:47:17.193 --> 00:47:20.953
+Where the rope basically lies
+within the face of a triangle.
+
+00:47:20.953 --> 00:47:24.583
+And then, when it reaches a
+edge, it's parallel to the edge.
+
+00:47:24.583 --> 00:47:27.843
+So, we need to be able to
+deal with these cases also.
+
+00:47:30.963 --> 00:47:32.703
+So, maybe this is a good moment
+
+00:47:32.703 --> 00:47:35.203
+to address this numerical
+robustness I mentioned before.
+
+00:47:35.203 --> 00:47:38.613
+So when you do any kind
+of distance tests, like,
+
+00:47:38.613 --> 00:47:41.203
+is the rope touching an edge
+or two edges intersecting,
+
+00:47:41.203 --> 00:47:43.803
+you can't just test for some
+distance being zero, right?
+
+00:47:43.803 --> 00:47:47.153
+You need to use some tolerance
+and you want to be consistent
+
+00:47:47.153 --> 00:47:47.986
+with this tolerance.
+
+00:47:47.986 --> 00:47:50.023
+It has to go through the whole algorithm
+
+00:47:50.023 --> 00:47:52.573
+and becomes part of all
+the collision tests,
+
+00:47:52.573 --> 00:47:54.983
+all the distance, or intersection tests.
+
+00:47:54.983 --> 00:47:57.953
+And we used tolerance of 0.001 millimeter,
+
+00:47:57.953 --> 00:48:01.723
+which is quite large, a necessity
+for just numerical errors
+
+00:48:01.723 --> 00:48:04.873
+But that way, it also
+covers geometric errors.
+
+00:48:04.873 --> 00:48:06.433
+If you, for example,
+
+00:48:06.433 --> 00:48:09.023
+have two boxes and you place
+them next to each other
+
+00:48:09.023 --> 00:48:13.073
+in your, in your level
+builder or level editor.
+
+00:48:14.091 --> 00:48:17.834
+It may be that when, when this
+geometry comes into the game,
+
+00:48:17.834 --> 00:48:20.673
+the vertices that were aligning it,
+
+00:48:20.673 --> 00:48:22.933
+are not exactly at the
+same coordinates, right?
+
+00:48:22.933 --> 00:48:25.585
+And you don't want your rope
+to slip into the tiny slot
+
+00:48:25.585 --> 00:48:27.143
+between the boxes.
+
+00:48:28.273 --> 00:48:32.690
+And another problem is there
+are some tests or predicates
+
+00:48:32.690 --> 00:48:35.403
+in this algorithm that are very important,
+
+00:48:35.403 --> 00:48:37.743
+but it can become a numerically unstable.
+
+00:48:37.743 --> 00:48:39.473
+With example is the actual orientation.
+
+00:48:39.473 --> 00:48:40.723
+It's important to get it right.
+
+00:48:40.723 --> 00:48:42.773
+Otherwise you basically tell
+the rope to go on the wrong
+
+00:48:42.773 --> 00:48:45.053
+side of the, of the edge.
+
+00:48:45.053 --> 00:48:46.993
+But sometimes, like in
+this case we just saw,
+
+00:48:46.993 --> 00:48:49.213
+when the rope is close
+to parallel to an edge.
+
+00:48:49.213 --> 00:48:51.913
+There is no good way to tell
+what the orientation should be.
+
+00:48:51.913 --> 00:48:54.764
+So, it's just important to tread carefully
+
+00:48:54.764 --> 00:48:56.567
+when writing these
+predicates, and think about
+
+00:48:56.567 --> 00:48:58.079
+what happens in the singular cases,
+
+00:48:58.079 --> 00:49:00.833
+and what are the consequences.
+
+00:49:00.833 --> 00:49:02.953
+There is no time to go
+into the more details,
+
+00:49:02.953 --> 00:49:04.233
+but I just thought I should bring it up
+
+00:49:04.233 --> 00:49:07.204
+because it definitely brings
+another level of difficulty
+
+00:49:07.204 --> 00:49:08.393
+to the problem.
+
+00:49:09.833 --> 00:49:11.543
+And speaking of difficulties.
+
+00:49:11.543 --> 00:49:15.323
+So, the Taut Rope Simulation,
+also never got 100% robust.
+
+00:49:15.323 --> 00:49:19.083
+To be able to deal with any
+geometry that you throw at it.
+
+00:49:19.083 --> 00:49:20.293
+Here are the main reasons why.
+
+00:49:20.293 --> 00:49:21.733
+So, it's the numerical robust bugs there
+
+00:49:21.733 --> 00:49:23.193
+that I just mentioned.
+
+00:49:23.193 --> 00:49:24.802
+It's pretty hard to get that 200%
+
+00:49:24.802 --> 00:49:27.855
+in an algorithm that's fairly complex.
+
+00:49:27.855 --> 00:49:31.093
+The edge intersections
+prove to be hard too.
+
+00:49:31.093 --> 00:49:33.603
+So, the topological
+classification that I showed you,
+
+00:49:33.603 --> 00:49:36.903
+where we always just look
+at one pair of edges,
+
+00:49:36.903 --> 00:49:39.053
+and then we also test in
+which direction the rope
+
+00:49:39.053 --> 00:49:41.123
+wants to slide by only looking at, looking
+
+00:49:41.123 --> 00:49:43.313
+at one edge in isolation.
+
+00:49:43.313 --> 00:49:44.803
+So, it mostly works,
+
+00:49:44.803 --> 00:49:48.953
+but I did find some obscure
+cases where there was some more
+
+00:49:48.953 --> 00:49:51.203
+intricate interdependency
+between the edges
+
+00:49:51.203 --> 00:49:52.753
+at an intersection.
+
+00:49:52.753 --> 00:49:55.713
+At certain angle of the
+rope going through it,
+
+00:49:55.713 --> 00:49:58.673
+and the algorithm would just
+make the wrong decision.
+
+00:50:02.093 --> 00:50:04.988
+and we didn't have time and
+the real need to dig deeper
+
+00:50:04.988 --> 00:50:06.983
+into all these cases.
+
+00:50:06.983 --> 00:50:09.398
+And one limitation, coming
+just from code design,
+
+00:50:09.398 --> 00:50:11.123
+is that we only support maximum
+
+00:50:11.123 --> 00:50:12.903
+of eight edges per rope point.
+
+00:50:12.903 --> 00:50:14.993
+So, if you have a very
+taxing error collision mesh
+
+00:50:14.993 --> 00:50:17.793
+with lot of convex edges coming together,
+
+00:50:17.793 --> 00:50:19.733
+and the rope needs to
+slide over that vertex,
+
+00:50:19.733 --> 00:50:22.803
+it will just randomly
+drop some of the edges.
+
+00:50:22.803 --> 00:50:23.901
+There is all this in this case,
+
+00:50:23.901 --> 00:50:26.079
+usually not catastrophic,
+since we have already
+
+00:50:26.079 --> 00:50:29.583
+a lot of edges, and it will
+keep the rope more or less
+
+00:50:29.583 --> 00:50:30.416
+on the surface.
+
+00:50:33.233 --> 00:50:37.614
+So, I'm going to show you
+this scene from Uncharted 4.
+
+00:50:37.614 --> 00:50:40.293
+Drake wraps the winch
+rope around the tree,
+
+00:50:40.293 --> 00:50:41.363
+as many times before,
+
+00:50:41.363 --> 00:50:44.673
+and now he's going to
+drive up the mudslide.
+
+00:50:46.833 --> 00:50:48.083
+- [Drake] We're all set.
+
+00:50:48.083 --> 00:50:49.164
+Here we go.
+
+00:50:49.164 --> 00:50:51.219
+(mechanical whirring)
+
+00:50:51.219 --> 00:50:53.220
+- Easy.
+
+00:50:53.220 --> 00:50:54.553
+- [Sully] Uh-oh!
+
+00:50:55.663 --> 00:50:57.282
+- [Drake] Whoa, whoa, whoa!
+
+00:50:57.282 --> 00:50:58.301
+(car crashing)
+
+00:50:58.301 --> 00:50:59.697
+(boulders smashing)
+
+00:50:59.697 --> 00:51:00.530
+- Don't panic! Don't panic!
+
+00:51:02.323 --> 00:51:03.953
+- [Jaroslav Sinecky] So, did
+you notice just what the rope
+
+00:51:03.953 --> 00:51:06.163
+was doing as the Jeep slid off?
+
+00:51:06.163 --> 00:51:06.996
+Of course you didn't.
+
+00:51:06.996 --> 00:51:09.143
+It's pretty much
+impossible to see anything
+
+00:51:09.143 --> 00:51:10.573
+because it happens very fast,
+
+00:51:10.573 --> 00:51:12.783
+and there is a lot of particles.
+
+00:51:12.783 --> 00:51:16.333
+And the camera is not even
+looking in that direction.
+
+00:51:16.333 --> 00:51:17.166
+Nevertheless,
+
+00:51:17.166 --> 00:51:19.613
+this was probably the hardest
+case for the Taut Rope
+
+00:51:19.613 --> 00:51:20.513
+in the whole game.
+
+00:51:21.433 --> 00:51:24.433
+The reason it was hard is
+because the rope is sliding
+
+00:51:24.433 --> 00:51:26.133
+very fast across lot of geometry.
+
+00:51:26.133 --> 00:51:29.355
+And since it's going mostly
+parallel to the surface,
+
+00:51:29.355 --> 00:51:32.803
+it's colliding with all these
+edges at very sharp angles
+
+00:51:32.803 --> 00:51:34.933
+and basically, hitting
+all these edge cases
+
+00:51:34.933 --> 00:51:36.533
+and numerically unstable tests.
+
+00:51:37.603 --> 00:51:39.783
+And we could have failed
+this particular case,
+
+00:51:39.783 --> 00:51:42.793
+as literally, nobody will be
+seeing what the rope is doing.
+
+00:51:42.793 --> 00:51:45.593
+But it was kind of nice this
+case and easy to reproduce.
+
+00:51:46.823 --> 00:51:49.763
+Here is a little more detail
+and it goes step-by-step.
+
+00:51:50.603 --> 00:51:51.436
+And...
+
+00:51:53.573 --> 00:51:56.733
+So, if you pay attention
+to this place here.
+
+00:51:56.733 --> 00:51:57.566
+Yeah.
+
+00:51:57.566 --> 00:51:59.653
+So, right now you can
+see that the rope clipped
+
+00:51:59.653 --> 00:52:02.263
+into the collision, but it will recover.
+
+00:52:02.263 --> 00:52:04.193
+It will get pulled out again.
+
+00:52:04.193 --> 00:52:06.713
+And then there is another
+problematic spot later.
+
+00:52:06.713 --> 00:52:07.863
+I think somewhere here.
+
+00:52:08.733 --> 00:52:10.723
+So, this is just to
+show that not everything
+
+00:52:10.723 --> 00:52:11.863
+was a total success,
+
+00:52:12.913 --> 00:52:14.725
+but it also shows the general
+tendency in these cases
+
+00:52:14.725 --> 00:52:17.583
+is that even if something
+goes wrong locally,
+
+00:52:17.583 --> 00:52:19.463
+usually the other edges
+with hold the rope up
+
+00:52:19.463 --> 00:52:21.743
+and pull it out of collision eventually.
+
+00:52:21.743 --> 00:52:24.963
+So, it rarely has a
+catastrophic consequences
+
+00:52:24.963 --> 00:52:25.813
+for the gameplay.
+
+00:52:27.233 --> 00:52:28.066
+Fortunately.
+
+00:52:29.833 --> 00:52:31.643
+Okay. So, let's wrap it up.
+
+00:52:31.643 --> 00:52:34.093
+So, when Last of Us 2 came out,
+
+00:52:34.093 --> 00:52:36.073
+somebody noticed the
+rope, and there was this
+
+00:52:36.073 --> 00:52:38.483
+long thread on Twitter
+with also, reactions
+
+00:52:38.483 --> 00:52:40.403
+from game developers.
+
+00:52:40.403 --> 00:52:42.543
+And a lot of them saying that
+seeing these was actually
+
+00:52:42.543 --> 00:52:45.303
+stressing them out and
+giving them nightmares.
+
+00:52:45.303 --> 00:52:47.713
+Some people expressing their
+fear that their producers
+
+00:52:47.713 --> 00:52:50.003
+will now ask for the same thing.
+
+00:52:50.003 --> 00:52:52.963
+So this talk, hopefully,
+if somebody actually tries
+
+00:52:52.963 --> 00:52:54.283
+to implement something similar,
+
+00:52:54.283 --> 00:52:56.569
+will give him some pointers and help avoid
+
+00:52:56.569 --> 00:52:59.546
+some of the pitfalls that we went through.
+
+00:52:59.546 --> 00:53:03.043
+But also, I'm hoping this can
+help make a better judgment
+
+00:53:03.043 --> 00:53:06.253
+of how difficult it is, and
+if it's worth the effort.
+
+00:53:06.253 --> 00:53:08.903
+It can maybe serve as a
+defense when some game director
+
+00:53:08.903 --> 00:53:11.253
+asks you for a rope like Last of Us 2.
+
+00:53:12.343 --> 00:53:14.483
+Because, yes, it wasn't easy.
+
+00:53:14.483 --> 00:53:16.944
+Over eight years in development.
+
+00:53:16.944 --> 00:53:18.223
+And even though the rope,
+
+00:53:18.223 --> 00:53:20.363
+definitely wasn't the
+only thing I was doing
+
+00:53:20.363 --> 00:53:21.293
+during those years.
+
+00:53:21.293 --> 00:53:24.733
+It was by far, I would say, the hardest.
+
+00:53:24.733 --> 00:53:25.983
+But your mileage vary.
+
+00:53:25.983 --> 00:53:27.833
+You might not need everything we did.
+
+00:53:28.903 --> 00:53:31.263
+If you only need some visual
+elements: hanging ropes,
+
+00:53:31.263 --> 00:53:33.193
+or vines, or weapon straps.
+
+00:53:33.193 --> 00:53:35.863
+Some simple rope PBD solver
+is actually very easy
+
+00:53:35.863 --> 00:53:38.143
+to put together, as I showed.
+
+00:53:38.143 --> 00:53:40.477
+Now, depends if you need
+the rope to be long,
+
+00:53:40.477 --> 00:53:43.573
+with a lot of nodes, because
+then, maybe you will have to
+
+00:53:43.573 --> 00:53:46.823
+deal with convergence
+and performance problems.
+
+00:53:46.823 --> 00:53:49.573
+How realistic you need the friction to be?
+
+00:53:49.573 --> 00:53:51.013
+How complex is the geometry?
+
+00:53:51.943 --> 00:53:55.413
+Because that's big one because
+that hugely impacts how hard
+
+00:53:55.413 --> 00:53:56.413
+will the problem be.
+
+00:53:57.398 --> 00:54:00.603
+And not surprisingly,
+if you have game play
+
+00:54:00.603 --> 00:54:03.833
+depending on your rope sim,
+that's when things get hard.
+
+00:54:03.833 --> 00:54:05.262
+So for the Taut Rope,
+
+00:54:05.262 --> 00:54:07.653
+which drove all the
+gameplay in Uncharted 4,
+
+00:54:07.653 --> 00:54:08.543
+and the Dynamic Rope,
+
+00:54:08.543 --> 00:54:11.322
+which we needed for
+gameplay in Last of Us 2,
+
+00:54:11.322 --> 00:54:13.833
+proved to be hard problems.
+
+00:54:13.833 --> 00:54:15.663
+What I showed you for
+the Taut Rope Sim may not
+
+00:54:15.663 --> 00:54:18.235
+seem very complicated,
+but it is a lot of code,
+
+00:54:18.235 --> 00:54:20.653
+a lot of complicated bookkeeping,
+
+00:54:20.653 --> 00:54:22.983
+and dealing with edge cases,
+and numerical robustness.
+
+00:54:22.983 --> 00:54:25.903
+So, don't underestimate that
+part, because I sure did.
+
+00:54:27.123 --> 00:54:29.673
+And as I already intimated,
+
+00:54:29.673 --> 00:54:32.893
+even though significant effort
+went into these systems,
+
+00:54:32.893 --> 00:54:35.533
+you never got them 100%
+robust to be able to deal
+
+00:54:35.533 --> 00:54:36.963
+with just any geometry.
+
+00:54:37.993 --> 00:54:38.826
+So again,
+
+00:54:38.826 --> 00:54:41.033
+the geometric complexity
+is the biggest factor here.
+
+00:54:41.033 --> 00:54:43.393
+So if you can limit, in any way,
+
+00:54:43.393 --> 00:54:45.503
+how complex is the geometry that the rope
+
+00:54:45.503 --> 00:54:46.903
+has to interact with.
+
+00:54:46.903 --> 00:54:50.313
+That's, that's the biggest
+help you can give to yourself.
+
+00:54:50.313 --> 00:54:52.503
+You know, by limiting
+the area where the rope
+
+00:54:52.503 --> 00:54:55.394
+can be deployed, or what
+kind of collision features
+
+00:54:55.394 --> 00:54:57.522
+it needs to interact with.
+
+00:54:57.522 --> 00:55:00.033
+Maybe, getting some clean
+and simple collision authored
+
+00:55:00.873 --> 00:55:04.223
+for these areas, or have some
+offline pre-processing step
+
+00:55:04.223 --> 00:55:05.573
+to clean it up.
+
+00:55:05.573 --> 00:55:07.263
+So, all these things,
+
+00:55:07.263 --> 00:55:09.906
+it's definitely worth looking into.
+
+00:55:09.906 --> 00:55:10.893
+(tense dramatic music)
+
+00:55:10.893 --> 00:55:12.623
+- And one last piece of advice.
+
+00:55:12.623 --> 00:55:15.173
+So, if you're going to
+implement something like that,
+
+00:55:15.173 --> 00:55:16.006
+it will not be easy.
+
+00:55:16.006 --> 00:55:19.303
+So, it's worth to invest
+some time into creating
+
+00:55:19.303 --> 00:55:22.567
+some solid debugging tools
+to make your life easier.
+
+00:55:22.567 --> 00:55:25.433
+One nice thing about the
+rope simulation like that
+
+00:55:25.433 --> 00:55:28.483
+is that it's a relatively
+isolatable piece of software.
+
+00:55:28.483 --> 00:55:32.927
+So, can grab a piece of
+a DPDK memory and use it
+
+00:55:32.927 --> 00:55:36.147
+as a ring buffer, and store all your input
+
+00:55:36.147 --> 00:55:38.343
+and state for each frame.
+
+00:55:38.343 --> 00:55:39.783
+And then, if something goes wrong,
+
+00:55:39.783 --> 00:55:43.342
+you can pause, and step back,
+and look at what failed.
+
+00:55:43.342 --> 00:55:45.903
+You bring up all your diagnostic drawing,
+
+00:55:45.903 --> 00:55:46.869
+and when stepping forward,
+
+00:55:46.869 --> 00:55:50.563
+you can run exactly the same simulation.
+
+00:55:50.563 --> 00:55:52.813
+Our engine is not
+deterministic. Not even close.
+
+00:55:52.813 --> 00:55:54.543
+But the rope simulation is.
+
+00:55:54.543 --> 00:55:57.623
+There is nothing that would
+be breaking determinism here.
+
+00:55:57.623 --> 00:55:59.693
+So, you can find a frame
+when something went wrong,
+
+00:55:59.693 --> 00:56:02.083
+and then just play that
+frame over and over,
+
+00:56:02.083 --> 00:56:04.803
+and debug it as you, as you want.
+
+00:56:04.803 --> 00:56:07.257
+We even created a Rope
+Dump where if somebody,
+
+00:56:07.257 --> 00:56:11.033
+mostly testers, would
+find something went wrong.
+
+00:56:11.033 --> 00:56:12.693
+They could just dump the ring buffer,
+
+00:56:12.693 --> 00:56:14.853
+plus some collision
+shape data into a file.
+
+00:56:14.853 --> 00:56:16.453
+And then, I could load
+it up on my Dev Kit,
+
+00:56:16.453 --> 00:56:19.063
+and debug it as I wanted.
+
+00:56:20.303 --> 00:56:23.423
+And so, this tool was absolutely crucial.
+
+00:56:23.423 --> 00:56:26.333
+You could never ship a game
+with these rope features
+
+00:56:26.333 --> 00:56:27.683
+without the rope debugger.
+
+00:56:29.953 --> 00:56:32.703
+And that's the end of my talk.
+
+00:56:32.703 --> 00:56:35.663
+So presumably, I'm literally
+answering your questions
+
+00:56:35.663 --> 00:56:37.283
+in the chat right now,
+
+00:56:37.283 --> 00:56:40.093
+but you can also contact me at this email
+
+00:56:40.093 --> 00:56:44.933
+if you have more questions,
+or ideas, or comments.
+
+00:56:44.933 --> 00:56:46.493
+So, thank you for listening.
+
+00:56:47.658 --> 00:56:51.408
+(energetic electronic music)
+

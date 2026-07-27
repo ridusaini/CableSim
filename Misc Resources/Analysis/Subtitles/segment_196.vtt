@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:19:35.673 --> 00:19:39.719
+we approximate the resulting
+normal force and friction.
+
+00:19:39.719 --> 00:19:41.383
+If the rope touches collision,
+
+00:19:41.383 --> 00:19:44.173
+we approximate the normal
+force due to the gravity.
+

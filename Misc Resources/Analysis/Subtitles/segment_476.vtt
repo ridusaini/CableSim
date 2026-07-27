@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:47:38.613 --> 00:47:41.203
+is the rope touching an edge
+or two edges intersecting,
+
+00:47:41.203 --> 00:47:43.803
+you can't just test for some
+distance being zero, right?
+
+00:47:43.803 --> 00:47:47.153
+You need to use some tolerance
+and you want to be consistent
+

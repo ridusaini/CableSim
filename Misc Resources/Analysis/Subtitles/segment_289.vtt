@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:28:54.313 --> 00:28:56.077
+Also, we have a system that allows us
+
+00:28:56.077 --> 00:28:59.223
+to take collision triangles
+to either ignore rope
+
+00:28:59.223 --> 00:29:01.523
+or to ignore everything but the rope.
+
+00:29:01.523 --> 00:29:03.903
+So, we can create special
+layer of collision,
+

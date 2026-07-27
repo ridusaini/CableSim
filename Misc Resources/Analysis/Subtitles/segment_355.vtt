@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:35:30.553 --> 00:35:32.363
+to these new positions.
+
+00:35:32.363 --> 00:35:34.943
+And it's not obvious how we
+should directly calculate
+
+00:35:34.943 --> 00:35:36.733
+how far should the two middle points,
+
+00:35:36.733 --> 00:35:40.773
+B and C move along their edges
+to straighten up the rope.
+

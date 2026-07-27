@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:05:06.003 --> 00:05:08.393
+for the Dynamic Rope Simulation.
+
+00:05:08.393 --> 00:05:10.813
+We have these distance
+constraints that don't let
+
+00:05:10.813 --> 00:05:14.963
+the dynamic nodes to get too
+far away from the safe line.
+

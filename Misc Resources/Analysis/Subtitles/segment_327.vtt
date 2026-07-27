@@ -1,0 +1,13 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:32:42.856 --> 00:32:45.243
+this green triangle.
+
+00:32:45.243 --> 00:32:47.733
+So, we just need to check for
+intersection of this triangle
+
+00:32:47.733 --> 00:32:50.724
+with any neighboring convex edges.
+

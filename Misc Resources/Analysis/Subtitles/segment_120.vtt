@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:11:58.413 --> 00:12:01.013
+We just means that we will move the node
+
+00:12:01.013 --> 00:12:01.846
+out of the collision.
+
+00:12:01.846 --> 00:12:05.113
+So, we will move it along the plane normal
+
+00:12:05.113 --> 00:12:06.813
+until it sits on top of the plane.
+

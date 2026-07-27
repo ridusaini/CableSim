@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:55:54.543 --> 00:55:57.623
+There is nothing that would
+be breaking determinism here.
+
+00:55:57.623 --> 00:55:59.693
+So, you can find a frame
+when something went wrong,
+
+00:55:59.693 --> 00:56:02.083
+and then just play that
+frame over and over,
+
+00:56:02.083 --> 00:56:04.803
+and debug it as you, as you want.
+

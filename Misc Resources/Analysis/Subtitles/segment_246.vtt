@@ -1,0 +1,16 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:24:37.438 --> 00:24:39.203
+and it's not much faster.
+
+00:24:39.203 --> 00:24:40.963
+It takes almost 10 milliseconds
+
+00:24:40.963 --> 00:24:43.413
+for the compute shader to finish,
+
+00:24:43.413 --> 00:24:45.543
+but the main difference
+and why this is much better
+

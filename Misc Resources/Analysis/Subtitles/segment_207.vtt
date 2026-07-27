@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:20:41.833 --> 00:20:45.253
+So, we introduce the friction
+constraint into the solver.
+
+00:20:45.253 --> 00:20:46.086
+It's very simple.
+
+00:20:46.086 --> 00:20:48.573
+You just need to remember the
+original position at the start
+
+00:20:48.573 --> 00:20:49.823
+of the time step.
+

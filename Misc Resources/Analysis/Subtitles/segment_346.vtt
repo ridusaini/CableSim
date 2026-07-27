@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:34:36.303 --> 00:34:39.223
+and we need to check for
+intersection of edges with these
+
+00:34:39.223 --> 00:34:40.843
+two triangles.
+
+00:34:40.843 --> 00:34:41.676
+It's all good.
+
+00:34:41.676 --> 00:34:43.853
+And then we check this
+triangle for point B.
+

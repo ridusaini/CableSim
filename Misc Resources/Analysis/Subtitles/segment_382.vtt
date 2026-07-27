@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:38:12.093 --> 00:38:14.923
+how to deal with edge intersections.
+
+00:38:14.923 --> 00:38:16.323
+So, our rope has one edge point.
+
+00:38:16.323 --> 00:38:18.539
+And as the end points are
+moving, it slides along
+
+00:38:18.539 --> 00:38:21.443
+the edge until our
+collision phase reports that
+

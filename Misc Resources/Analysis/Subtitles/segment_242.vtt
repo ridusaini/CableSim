@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:24:10.603 --> 00:24:13.613
+Because, as I was saying,
+rope solving is inherently
+
+00:24:13.613 --> 00:24:16.076
+very serial process, as
+you're propagating impulses
+
+00:24:16.076 --> 00:24:17.153
+along the rope.
+
+00:24:18.115 --> 00:24:21.093
+We're on the one wavefront
+and process 64 nodes
+

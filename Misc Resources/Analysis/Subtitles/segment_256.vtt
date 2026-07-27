@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:25:34.503 --> 00:25:37.783
+around each node into a
+set of collision planes.
+
+00:25:37.783 --> 00:25:39.913
+And then, we needed to be able
+to collide with convex edges.
+
+00:25:39.913 --> 00:25:41.773
+So, we just marked the pairs of planes
+
+00:25:41.773 --> 00:25:43.733
+that form a convex edge.
+

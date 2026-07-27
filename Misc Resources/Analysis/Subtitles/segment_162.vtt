@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:16:11.843 --> 00:16:13.583
+and that will be our bending stiffness.
+
+00:16:13.583 --> 00:16:17.094
+So, that's the value we
+can use to tweak how stiff
+
+00:16:17.094 --> 00:16:19.494
+should the rope behave
+when it comes to bending.
+

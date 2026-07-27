@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:28:05.773 --> 00:28:07.970
+So, plane n₁ here doesn't
+have any convex edge.
+
+00:28:07.970 --> 00:28:10.963
+So, it forks as an infinite plane.
+
+00:28:10.963 --> 00:28:13.613
+And again, it can create a
+ghost collision like this.
+

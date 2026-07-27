@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:42:55.743 --> 00:42:57.573
+I had to invent some
+names for these cases.
+
+00:42:57.573 --> 00:43:01.943
+So, I can reason about them
+and write a code for them.
+
+00:43:01.943 --> 00:43:06.943
+And the sub-cases would be
+either Ignore B or Ignore A,
+

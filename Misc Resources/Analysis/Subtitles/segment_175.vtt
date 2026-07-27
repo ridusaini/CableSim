@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:17:30.383 --> 00:17:31.703
+and the collision.
+
+00:17:31.703 --> 00:17:33.253
+So, that's one drawback of PBD.
+
+00:17:34.173 --> 00:17:35.323
+And because, for friction,
+
+00:17:35.323 --> 00:17:36.533
+you need to know the normal force
+
+00:17:36.533 --> 00:17:37.623
+between the rope and the collision.
+

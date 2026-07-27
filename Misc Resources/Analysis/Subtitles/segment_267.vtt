@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:26:41.300 --> 00:26:44.263
+Based on its current
+velocity, the direction.
+
+00:26:44.263 --> 00:26:46.573
+Individual neighboring
+nodes might be pulling it
+
+00:26:46.573 --> 00:26:50.603
+based on how much the closest
+key frame nodes have moved.
+

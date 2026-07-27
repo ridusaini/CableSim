@@ -1,0 +1,20 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:15:23.428 --> 00:15:25.093
+The bending stiffness could be done
+
+00:15:25.093 --> 00:15:26.723
+in many different ways.
+
+00:15:26.723 --> 00:15:28.993
+I just chose this way
+because it seemed convenient.
+
+00:15:28.993 --> 00:15:30.513
+And because I wanted to avoid using
+
+00:15:30.513 --> 00:15:32.921
+any trigonometric functions
+to keep the evaluation
+

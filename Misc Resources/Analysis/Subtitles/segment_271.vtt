@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:27:06.433 --> 00:27:08.933
+are similar so we can merge them together.
+
+00:27:08.933 --> 00:27:12.083
+We did the convex edges and
+then using current position of
+
+00:27:12.083 --> 00:27:12.916
+the node,
+
+00:27:12.916 --> 00:27:15.713
+try to see which planes are
+more important than others,
+

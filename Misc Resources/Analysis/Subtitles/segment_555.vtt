@@ -1,0 +1,12 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:55:32.927 --> 00:55:36.147
+as a ring buffer, and store all your input
+
+00:55:36.147 --> 00:55:38.343
+and state for each frame.
+
+00:55:38.343 --> 00:55:39.783
+And then, if something goes wrong,
+

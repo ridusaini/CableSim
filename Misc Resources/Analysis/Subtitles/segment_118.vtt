@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:11:48.363 --> 00:11:51.773
+we just move them closer together
+by the same distance each.
+
+00:11:51.773 --> 00:11:54.273
+And then we do the same
+for the last two nodes.
+
+00:11:54.273 --> 00:11:56.913
+And here we add the collision constraints.
+

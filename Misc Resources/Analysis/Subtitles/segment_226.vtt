@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:22:36.383 --> 00:22:39.373
+So basically, I'm iterating
+over each distance constraint.
+
+00:22:39.373 --> 00:22:42.093
+We will move the nodes
+a little bit farther.
+
+00:22:42.093 --> 00:22:43.093
+Or in other words,
+
+00:22:43.093 --> 00:22:45.671
+we pretend as if the target
+distance is a little bit shorter
+

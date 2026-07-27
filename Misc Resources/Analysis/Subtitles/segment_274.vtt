@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:27:24.423 --> 00:27:26.233
+where this approach breaks down.
+
+00:27:26.233 --> 00:27:29.813
+So, we only have pairs of
+planes scraping a convex edge.
+
+00:27:29.813 --> 00:27:33.573
+We don't have a concept of group
+of convex planes like this,
+

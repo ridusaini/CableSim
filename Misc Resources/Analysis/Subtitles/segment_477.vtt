@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:47:43.803 --> 00:47:47.153
+You need to use some tolerance
+and you want to be consistent
+
+00:47:47.153 --> 00:47:47.986
+with this tolerance.
+
+00:47:47.986 --> 00:47:50.023
+It has to go through the whole algorithm
+
+00:47:50.023 --> 00:47:52.573
+and becomes part of all
+the collision tests,
+

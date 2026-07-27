@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:39:07.383 --> 00:39:09.753
+So, to make it easier to reason about it,
+
+00:39:09.753 --> 00:39:14.103
+what we do is that we evaluate
+all the pairs of two edges.
+
+00:39:14.103 --> 00:39:16.783
+So, we always only look
+at two edges at a time,
+

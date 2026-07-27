@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:17:18.113 --> 00:17:20.713
+So, friction is problematic with PBD
+
+00:17:20.713 --> 00:17:24.243
+because since you're solving
+constraints on position level,
+
+00:17:24.243 --> 00:17:26.353
+you don't know what the
+constraint forces are.
+

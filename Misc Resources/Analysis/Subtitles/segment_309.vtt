@@ -1,0 +1,16 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:30:53.663 --> 00:30:56.013
+The yellow node 0 is key framed.
+
+00:30:56.013 --> 00:30:57.223
+And we know the length of the rope
+
+00:30:57.223 --> 00:30:58.583
+between node 0 and 3.
+
+00:30:59.443 --> 00:31:03.553
+And here we have a collision
+constraint for the node 3.
+

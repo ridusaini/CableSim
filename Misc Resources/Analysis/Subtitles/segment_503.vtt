@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:50:19.733 --> 00:50:22.803
+it will just randomly
+drop some of the edges.
+
+00:50:22.803 --> 00:50:23.901
+There is all this in this case,
+
+00:50:23.901 --> 00:50:26.079
+usually not catastrophic,
+since we have already
+
+00:50:26.079 --> 00:50:29.583
+a lot of edges, and it will
+keep the rope more or less
+

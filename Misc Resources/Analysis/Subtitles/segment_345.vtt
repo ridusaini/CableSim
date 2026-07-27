@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:34:29.899 --> 00:34:32.543
+to check if we actually can get there.
+
+00:34:32.543 --> 00:34:34.623
+And we do it again by
+moving points one by one.
+
+00:34:34.623 --> 00:34:36.303
+So first, we move point C,
+
+00:34:36.303 --> 00:34:39.223
+and we need to check for
+intersection of edges with these
+

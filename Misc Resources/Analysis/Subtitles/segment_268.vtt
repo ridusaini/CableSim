@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:26:46.573 --> 00:26:50.603
+based on how much the closest
+key frame nodes have moved.
+
+00:26:50.603 --> 00:26:53.883
+And this gives us A-b-b around the node,
+
+00:26:53.883 --> 00:26:56.433
+and then we collect all
+the geometry in that A-b-b.
+

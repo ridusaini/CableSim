@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:38:35.663 --> 00:38:38.653
+or numerically, the first
+edge that the rope hits.
+
+00:38:38.653 --> 00:38:39.696
+We want to be able to gather all the edges
+
+00:38:39.696 --> 00:38:43.623
+within some tolerance
+of the final position.
+

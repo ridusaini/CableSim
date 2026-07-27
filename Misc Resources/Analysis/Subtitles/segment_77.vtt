@@ -1,0 +1,16 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:07:40.593 --> 00:07:43.132
+all the effort on the rope was focused on
+
+00:07:43.132 --> 00:07:46.263
+revamping the Dynamic Rope
+Simulation for a change.
+
+00:07:47.113 --> 00:07:48.423
+So, we needed it to make it robust
+
+00:07:48.423 --> 00:07:49.663
+so it never clips into collision,
+

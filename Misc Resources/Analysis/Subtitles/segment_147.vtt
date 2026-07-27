@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:14:40.063 --> 00:14:43.013
+And for now, let's assume
+you want to push them
+
+00:14:43.013 --> 00:14:44.803
+all the way into a straight line.
+
+00:14:44.803 --> 00:14:48.763
+And how do we find these
+unknowns: d₁, d₂, d₃?
+
+00:14:48.763 --> 00:14:51.173
+So, since the targets are
+supposed to be on a straight line,
+

@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:32:35.773 --> 00:32:39.993
+So first, we move point A
+and keep the point B fixed.
+
+00:32:39.993 --> 00:32:42.856
+And during that movement,
+this line segment will sweep
+
+00:32:42.856 --> 00:32:45.243
+this green triangle.
+

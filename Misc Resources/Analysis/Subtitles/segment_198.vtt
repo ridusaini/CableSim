@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:19:46.623 --> 00:19:49.433
+and it's not because it
+bends around collision edge,
+
+00:19:49.433 --> 00:19:51.893
+we let the tension fall off to zero.
+
+00:19:51.893 --> 00:19:54.063
+And for a free hanging segment of rope,
+
+00:19:54.063 --> 00:19:56.373
+we just add tension
+resulting from gravity.
+

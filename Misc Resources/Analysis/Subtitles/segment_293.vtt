@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:29:18.153 --> 00:29:20.473
+I just want to show
+you a few useful tricks
+
+00:29:20.473 --> 00:29:22.453
+you can do with collision constraints.
+
+00:29:22.453 --> 00:29:24.233
+So, before you send
+them off to the solver,
+
+00:29:24.233 --> 00:29:26.793
+you can look at them, and
+see if there is something
+

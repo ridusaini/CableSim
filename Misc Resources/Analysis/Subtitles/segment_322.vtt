@@ -1,0 +1,12 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:32:14.883 --> 00:32:17.303
+So, we start with this simple case.
+
+00:32:17.303 --> 00:32:19.933
+We have just a straight line segment A-B.
+
+00:32:19.933 --> 00:32:21.733
+The game tells us that on the next frame,
+

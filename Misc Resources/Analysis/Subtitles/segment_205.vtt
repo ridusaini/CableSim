@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:20:30.423 --> 00:20:31.623
+the velocity from a node,
+
+00:20:31.623 --> 00:20:33.823
+if there is some external
+force or constraint
+
+00:20:33.823 --> 00:20:35.823
+pulling on the node,
+even just a little bit,
+
+00:20:35.823 --> 00:20:38.187
+it will move during the next solver step,
+

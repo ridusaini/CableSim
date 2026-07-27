@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:11:16.463 --> 00:11:20.153
+the constraints will act on
+the position of the nodes
+
+00:11:20.153 --> 00:11:22.053
+and we will directly move the nodes
+
+00:11:22.053 --> 00:11:23.633
+to satisfy these constraints.
+
+00:11:24.503 --> 00:11:27.693
+So firstly, we want a constraint
+that keep neighboring nodes
+

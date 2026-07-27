@@ -1,0 +1,13 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:46:07.933 --> 00:46:10.503
+And instead, we have
+Inner Corner Move Along C,
+
+00:46:10.503 --> 00:46:12.163
+and Inner Corner Move Along D.
+
+00:46:12.163 --> 00:46:13.933
+So we know we will abandon edge A.
+

@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:17:10.933 --> 00:17:13.203
+It tends to create these
+more smooth curves,
+
+00:17:14.143 --> 00:17:16.833
+but we'll need to do something
+about the friction, right?
+
+00:17:18.113 --> 00:17:20.713
+So, friction is problematic with PBD
+

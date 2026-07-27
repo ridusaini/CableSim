@@ -1,0 +1,11 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:26:37.460 --> 00:26:41.300
+how the node might move during
+the upcoming solver step.
+
+00:26:41.300 --> 00:26:44.263
+Based on its current
+velocity, the direction.
+

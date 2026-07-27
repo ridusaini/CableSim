@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:34:49.655 --> 00:34:53.043
+we are done, and this is the
+final position of the rope.
+
+00:34:53.043 --> 00:34:55.353
+So, this is the core of the algorithm.
+
+00:34:55.353 --> 00:34:58.853
+We are alternating these
+movement and collision phases.
+

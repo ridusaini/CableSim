@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:46:37.323 --> 00:46:40.223
+So, at certain point, the two,
+
+00:46:40.223 --> 00:46:42.783
+the two rope points will
+get within some tolerance
+
+00:46:42.783 --> 00:46:44.953
+from each other, and we will
+merge them into one point.
+

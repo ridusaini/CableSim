@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:19:29.543 --> 00:19:31.923
+And we use facts like, the
+tension is zero at the free end
+
+00:19:31.923 --> 00:19:33.273
+of the rope.
+
+00:19:33.273 --> 00:19:35.673
+If the rope bends around
+the collision edge,
+
+00:19:35.673 --> 00:19:39.719
+we approximate the resulting
+normal force and friction.
+

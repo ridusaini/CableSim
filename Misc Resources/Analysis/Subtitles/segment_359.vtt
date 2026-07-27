@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:35:53.403 --> 00:35:57.779
+And then, we keep doing that
+until we find a position
+
+00:35:57.779 --> 00:36:01.163
+where the rope is straighten
+up or as straight as it can go,
+
+00:36:01.163 --> 00:36:03.073
+given the collision edges.
+

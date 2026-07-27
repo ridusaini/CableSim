@@ -1,0 +1,18 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:56:07.257 --> 00:56:11.033
+mostly testers, would
+find something went wrong.
+
+00:56:11.033 --> 00:56:12.693
+They could just dump the ring buffer,
+
+00:56:12.693 --> 00:56:14.853
+plus some collision
+shape data into a file.
+
+00:56:14.853 --> 00:56:16.453
+And then, I could load
+it up on my Dev Kit,
+

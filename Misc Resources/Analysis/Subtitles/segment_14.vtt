@@ -1,0 +1,13 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:01:22.903 --> 00:01:24.203
+It had some bending stiffness,
+
+00:01:24.203 --> 00:01:28.213
+and was able to interact with
+some simple collision edges,
+
+00:01:28.213 --> 00:01:31.293
+and with animated character collision.
+

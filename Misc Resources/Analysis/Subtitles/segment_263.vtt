@@ -1,0 +1,11 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:26:19.253 --> 00:26:21.777
+otherwise, it collides
+with one of the planes.
+
+00:26:21.777 --> 00:26:26.293
+And this way, the node can
+slide smoothly across the edge.
+

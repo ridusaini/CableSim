@@ -1,0 +1,16 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:22:54.913 --> 00:22:56.243
+it should be still stable.
+
+00:22:56.243 --> 00:22:57.543
+At least in my experience.
+
+00:22:58.473 --> 00:22:59.933
+Other common method is multigrid.
+
+00:22:59.933 --> 00:23:03.533
+So, you create a series of
+successively coarser levels
+

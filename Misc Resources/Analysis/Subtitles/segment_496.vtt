@@ -1,0 +1,20 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:49:36.903 --> 00:49:39.053
+and then we also test in
+which direction the rope
+
+00:49:39.053 --> 00:49:41.123
+wants to slide by only looking at, looking
+
+00:49:41.123 --> 00:49:43.313
+at one edge in isolation.
+
+00:49:43.313 --> 00:49:44.803
+So, it mostly works,
+
+00:49:44.803 --> 00:49:48.953
+but I did find some obscure
+cases where there was some more
+

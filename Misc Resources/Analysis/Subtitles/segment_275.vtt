@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:27:29.813 --> 00:27:33.573
+We don't have a concept of group
+of convex planes like this,
+
+00:27:33.573 --> 00:27:36.123
+and it's not trivial to add
+this kind of concept into the
+
+00:27:36.123 --> 00:27:37.113
+solver.
+
+00:27:37.113 --> 00:27:39.323
+So in this case, if you have a node here,
+

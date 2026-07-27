@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:24:23.993 --> 00:24:25.693
+one after each other, serially.
+
+00:24:25.693 --> 00:24:26.913
+So in total,
+
+00:24:26.913 --> 00:24:29.953
+you end up doing more work on
+GPU than you would do on CPU.
+
+00:24:31.113 --> 00:24:33.323
+This is not the best
+utilization of your silicon,
+

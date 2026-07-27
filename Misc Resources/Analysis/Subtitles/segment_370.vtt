@@ -1,0 +1,14 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:36:59.381 --> 00:37:03.533
+as long as two consecutive
+edges are lying in a plane,
+
+00:37:03.533 --> 00:37:06.203
+you can keep unrolling
+onto the same 2D plane.
+
+00:37:06.203 --> 00:37:08.283
+So here, we start with edges A and B,
+

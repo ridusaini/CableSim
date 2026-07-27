@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:07:09.943 --> 00:07:12.471
+Once you throw a bundle
+of rope into the level,
+
+00:07:12.471 --> 00:07:16.123
+the Dynamic Rope Simulation
+has to take care of itself.
+
+00:07:16.123 --> 00:07:18.323
+So, it has to behave reasonably,
+
+00:07:18.323 --> 00:07:19.176
+always stay out of collision
+

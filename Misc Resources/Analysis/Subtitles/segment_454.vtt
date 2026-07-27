@@ -1,0 +1,12 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:45:24.844 --> 00:45:27.643
+and we see that B and E are Side Edges.
+
+00:45:27.643 --> 00:45:30.043
+So, we can ignore these edges.
+
+00:45:30.043 --> 00:45:32.923
+And now we only have A, C, D left.
+

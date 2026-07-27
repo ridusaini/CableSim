@@ -1,0 +1,17 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:10:59.203 --> 00:11:00.753
+The rope has stretched.
+
+00:11:00.753 --> 00:11:03.313
+And also let's assume we
+have this purple piece
+
+00:11:03.313 --> 00:11:04.553
+of collision geometry here,
+
+00:11:04.553 --> 00:11:07.133
+and the rope is clipping
+into the collision.
+

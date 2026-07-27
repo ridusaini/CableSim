@@ -1,0 +1,15 @@
+WEBVTT	#Elemental Media Engine(TM) 2.1.3.0
+X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:180000
+
+00:33:42.216 --> 00:33:45.393
+Now, how do we find out
+how far it should slide?
+
+00:33:45.393 --> 00:33:48.113
+So here we are, looking
+along the edge and rA, rB
+
+00:33:48.113 --> 00:33:51.033
+are perpendicular distances
+of the points from the edge.
+
