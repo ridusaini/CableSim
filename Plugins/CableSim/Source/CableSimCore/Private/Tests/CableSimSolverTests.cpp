@@ -1013,6 +1013,83 @@ bool FCableSimDrapeOverEdgeTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimRestOnBoxEdgeTest,
+	"CableSim.Core.Manifold.RestOnBoxEdge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimRestOnBoxEdgeTest::RunTest(const FString& Parameters)
+{
+	const FVector3d V[6] = {
+		{-120, -40, 0}, {0, -40, 0}, {0, 40, 0},
+		{-120, 40, 0}, {0, -40, -120}, {0, 40, -120}};
+	auto MakeTri = [&V](const int32 Index, const int32 I0, const int32 I1, const int32 I2)
+	{
+		CableSim::FCollisionTriangle Triangle;
+		Triangle.Id = {1, 0, CableSim::ECollisionFeatureType::Triangle, Index, INDEX_NONE};
+		Triangle.GeometryType = CableSim::ECollisionGeometryType::Box;
+		Triangle.bStaticObject = true;
+		Triangle.Vertices[0] = V[I0];
+		Triangle.Vertices[1] = V[I1];
+		Triangle.Vertices[2] = V[I2];
+		Triangle.VertexIndices[0] = I0;
+		Triangle.VertexIndices[1] = I1;
+		Triangle.VertexIndices[2] = I2;
+		return Triangle;
+	};
+	TArray<CableSim::FCollisionTriangle> Triangles;
+	Triangles.Add(MakeTri(0, 0, 1, 2));
+	Triangles.Add(MakeTri(1, 0, 2, 3));
+	Triangles.Add(MakeTri(2, 1, 4, 5));
+	Triangles.Add(MakeTri(3, 1, 5, 2));
+	TArray<CableSim::FCollisionEdge> Edges;
+	TArray<CableSim::FCollisionVertex> Vertices;
+	const CableSim::FTopologyCompileDiagnostics Topology =
+		CableSim::FCollisionTopologyCompiler::CompileTopology(Triangles, 0.1, 8, Edges, Vertices);
+	TestTrue(TEXT("Box corner compiles a convex edge"), Topology.ConvexEdgeCount >= 1);
+
+	CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(170.0, 10.0);
+	const FVector3d Start(-80, 0, 5);
+	const FVector3d End(5, 0, -80);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Box-edge solver initializes"), Solver.Initialize(Start, End, Config));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	CableSim::FManifoldConfig ManifoldConfig;
+	const CableSim::FContactGenerator Generator =
+		[&Triangles, &Edges, ManifoldConfig](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode == CableSim::EParticleMode::Dynamic)
+			{
+				CableSim::FContactManifoldCompiler::CompileNodeContacts(
+					Index, Particles[Index].Position, Particles[Index].PreviousPosition,
+					Triangles, Edges, ManifoldConfig, Contacts);
+			}
+		}
+	};
+
+	double WindowRms = 0.0;
+	double WindowPeak = 0.0;
+	for (int32 Step = 0; Step < 600; ++Step)
+	{
+		const CableSim::FStepResult Result = Solver.AdvanceStep(Input, Generator);
+		if (Step >= 480)
+		{
+			WindowRms += Result.RmsParticleSpeed;
+			WindowPeak = FMath::Max(WindowPeak, Result.MaximumParticleSpeed);
+		}
+	}
+	WindowRms /= 120.0;
+	AddInfo(FString::Printf(
+		TEXT("Rest on box edge: window RMS %.4f cm/s, peak %.1f cm/s"), WindowRms, WindowPeak));
+	TestFalse(TEXT("Box-edge rest does not suspend"), Solver.IsSuspended());
+	TestTrue(TEXT("Cable rests on the box edge without bouncing (RMS < 3 cm/s)"), WindowRms < 3.0);
+	TestTrue(TEXT("No contact node is ejected at rest (peak < 20 cm/s)"), WindowPeak < 20.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimBackFacePruneTest,
 	"CableSim.Core.Manifold.BackFacePruned",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
