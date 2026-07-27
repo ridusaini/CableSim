@@ -202,8 +202,12 @@ bool FCableSimManifoldConvexEdgeRadialTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Edge yields a single contact, faces suppressed"), Contacts.Num(), 1);
 	if (Contacts.Num() == 1)
 	{
-		const FVector3d Expected = FVector3d(1.0, 0.0, 1.0).GetSafeNormal();
-		TestTrue(TEXT("Contact normal is radial from the edge"), Contacts[0].Normal.Equals(Expected, 1.e-6));
+		TestTrue(TEXT("Contact is a convex-edge contact"), Contacts[0].bConvexEdge);
+		TestTrue(TEXT("Edge radius is the node radius"),
+			FMath::IsNearlyEqual(Contacts[0].EdgeRadius, Config.NodeRadius, 1.e-9));
+		TestTrue(TEXT("Edge geometry carried through"),
+			Contacts[0].EdgeStart.Equals(FVector3d(0.0, -10.0, 0.0), 1.e-6)
+				&& Contacts[0].EdgeEnd.Equals(FVector3d(0.0, 10.0, 0.0), 1.e-6));
 	}
 	return true;
 }

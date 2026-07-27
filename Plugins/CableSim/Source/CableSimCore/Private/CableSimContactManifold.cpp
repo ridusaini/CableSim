@@ -107,14 +107,17 @@ namespace CableSim
 			Contact.bHasFrictionAnchor = true;
 		};
 
-		// Convex edges: when the node sits in an edge's exterior wedge (radial
-		// direction between both outward face normals), one radial contact replaces
-		// the two face planes so they can't fight. The faces those edges cover are
-		// recorded so the plane pass below skips them.
+		// Convex edges: when the node sits in an edge's exterior wedge, emit a rounded
+		// edge contact carrying the segment + both face normals. The solver constrains
+		// the node to the edge cylinder each iteration (curved, no linearization) and
+		// deactivates it over a face. The covered faces are recorded so the plane pass
+		// skips them (the edge replaces them in the wedge).
 		struct FEdgeCandidate
 		{
-			FVector3d Normal;
-			double PlaneOffset = 0.0;
+			FVector3d Start;
+			FVector3d End;
+			FVector3d Normal0;
+			FVector3d Normal1;
 			double Distance = 0.0;
 			FCollisionFeatureId FeatureId;
 		};
@@ -145,11 +148,7 @@ namespace CableSim
 			{
 				continue;
 			}
-			EdgeCandidates.Add({
-				RadialDirection,
-				FVector3d::DotProduct(Closest, RadialDirection),
-				Distance,
-				Edge.Id});
+			EdgeCandidates.Add({Edge.Start, Edge.End, Normal0, Normal1, Distance, Edge.Id});
 			SuppressedNormals.Add(Normal0);
 			SuppressedNormals.Add(Normal1);
 		}
@@ -161,8 +160,17 @@ namespace CableSim
 		for (int32 Index = 0; Index < EdgeCount; ++Index)
 		{
 			const FEdgeCandidate& Edge = EdgeCandidates[Index];
-			EmitContact(Edge.Normal, Edge.PlaneOffset + Radius, Edge.FeatureId);
-			OutContacts.Last().bConvexEdge = true;
+			FContactConstraint& Contact = OutContacts.AddDefaulted_GetRef();
+			Contact.FeatureId = PackContactFeatureId(Edge.FeatureId);
+			Contact.ParticleIndex = ParticleIndex;
+			Contact.Normal = Edge.Normal0;
+			Contact.SecondNormal = Edge.Normal1;
+			Contact.EdgeStart = Edge.Start;
+			Contact.EdgeEnd = Edge.End;
+			Contact.EdgeRadius = Radius;
+			Contact.bConvexEdge = true;
+			Contact.FrictionAnchorPosition = NodePreviousPosition;
+			Contact.bHasFrictionAnchor = true;
 		}
 
 		struct FCandidate

@@ -980,6 +980,99 @@ bool FCableSimEdgeFrictionHoldsTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimDrapeOverEdgeTest,
+	"CableSim.Core.Manifold.DrapeOverEdgeHolds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimDrapeOverEdgeTest::RunTest(const FString& Parameters)
+{
+	// A symmetric cable draped over a real convex ridge (edge compiled by the
+	// topology compiler, contacts by the manifold compiler) must settle centered on
+	// the edge without sliding off or bouncing.
+	auto MakeTri = [](const int32 Index, const int32 I0, const int32 I1, const int32 I2,
+		const FVector3d& V0, const FVector3d& V1, const FVector3d& V2)
+	{
+		CableSim::FCollisionTriangle Triangle;
+		Triangle.Id = {1, 0, CableSim::ECollisionFeatureType::Triangle, Index, INDEX_NONE};
+		Triangle.GeometryType = CableSim::ECollisionGeometryType::TriangleMesh;
+		Triangle.bStaticObject = true;
+		Triangle.Vertices[0] = V0;
+		Triangle.Vertices[1] = V1;
+		Triangle.Vertices[2] = V2;
+		Triangle.VertexIndices[0] = I0;
+		Triangle.VertexIndices[1] = I1;
+		Triangle.VertexIndices[2] = I2;
+		return Triangle;
+	};
+	const FVector3d V0(0.0, -60.0, 0.0);
+	const FVector3d V1(0.0, 60.0, 0.0);
+	const FVector3d V2(-60.0, 0.0, -60.0);
+	const FVector3d V3(60.0, 0.0, -60.0);
+	TArray<CableSim::FCollisionTriangle> Triangles;
+	Triangles.Add(MakeTri(0, 0, 1, 2, V0, V1, V2));
+	Triangles.Add(MakeTri(1, 1, 0, 3, V1, V0, V3));
+	TArray<CableSim::FCollisionEdge> Edges;
+	TArray<CableSim::FCollisionVertex> Vertices;
+	const CableSim::FTopologyCompileDiagnostics TopologyDiagnostics =
+		CableSim::FCollisionTopologyCompiler::CompileTopology(Triangles, 0.1, 8, Edges, Vertices);
+	TestTrue(TEXT("Ridge compiles a convex edge"), TopologyDiagnostics.ConvexEdgeCount >= 1);
+
+	CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(200.0, 10.0);
+	const FVector3d Start(-80.0, 0.0, -30.0);
+	const FVector3d End(80.0, 0.0, -30.0);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Drape solver initializes"), Solver.Initialize(Start, End, Config));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	CableSim::FManifoldConfig ManifoldConfig;
+	const CableSim::FContactGenerator Generator =
+		[&Triangles, &Edges, ManifoldConfig](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				continue;
+			}
+			CableSim::FContactManifoldCompiler::CompileNodeContacts(
+				Index, Particles[Index].Position, Particles[Index].PreviousPosition,
+				Triangles, Edges, ManifoldConfig, Contacts);
+		}
+	};
+
+	double WindowRms = 0.0;
+	CableSim::FStepResult Result;
+	for (int32 Step = 0; Step < 600; ++Step)
+	{
+		Result = Solver.AdvanceStep(Input, Generator);
+		if (Step >= 480)
+		{
+			WindowRms += Result.RmsParticleSpeed;
+		}
+	}
+	WindowRms /= 120.0;
+
+	const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
+	double CenterOfMassX = 0.0;
+	for (const CableSim::FParticle& Particle : Particles)
+	{
+		CenterOfMassX += Particle.Position.X;
+	}
+	CenterOfMassX /= static_cast<double>(Particles.Num());
+	const FVector3d MiddleNode = Particles[Particles.Num() / 2].Position;
+	AddInfo(FString::Printf(
+		TEXT("Drape: window-avg RMS %.4f cm/s, CoM.X %.3f cm, middle node (%.2f,%.2f,%.2f)"),
+		WindowRms, CenterOfMassX, MiddleNode.X, MiddleNode.Y, MiddleNode.Z));
+
+	TestFalse(TEXT("Drape does not suspend"), Solver.IsSuspended());
+	TestTrue(TEXT("Drape stays centered on the ridge (no slide-off)"), FMath::Abs(CenterOfMassX) < 15.0);
+	TestTrue(TEXT("Middle node rests on the ridge, not down a slope"),
+		FMath::Abs(MiddleNode.X) < 15.0 && MiddleNode.Z > -15.0);
+	TestTrue(TEXT("Drape settles without bouncing (RMS < 3 cm/s)"), WindowRms < 3.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimNodeCountBenchmarkTest,
 	"CableSim.Core.Performance.NodeCountScaling",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

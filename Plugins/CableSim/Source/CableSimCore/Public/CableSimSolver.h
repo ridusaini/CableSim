@@ -83,9 +83,17 @@ namespace CableSim
 		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		FVector3d FrictionAnchorPosition = FVector3d::ZeroVector;
 		bool bHasFrictionAnchor = false;
-		// A rounded convex-edge contact. The cable grips an edge harder than a flat
-		// face (tension/capstan), so these get a boosted static-friction budget.
+		// Rounded convex-edge contact. When set, the solver constrains the node to
+		// stay >= EdgeRadius from the segment [EdgeStart,EdgeEnd] while its radial
+		// direction lies in the exterior wedge between Normal (face 0) and
+		// SecondNormal (face 1) — recomputed each iteration so it curves smoothly.
+		// The cable grips an edge harder than a flat face (tension/capstan), so these
+		// also get a boosted static-friction budget.
 		bool bConvexEdge = false;
+		FVector3d EdgeStart = FVector3d::ZeroVector;
+		FVector3d EdgeEnd = FVector3d::ZeroVector;
+		FVector3d SecondNormal = FVector3d::UnitX();
+		double EdgeRadius = 0.0;
 	};
 
 	struct CABLESIMCORE_API FGuideConstraint
@@ -206,7 +214,8 @@ namespace CableSim
 			int32 MiddleIndex,
 			int32 LastIndex,
 			double IterationStrength);
-		double ProjectContactConstraint(const FContactConstraint& Contact);
+		double ProjectContactConstraint(const FContactConstraint& Contact, FVector3d& OutEffectiveNormal, bool& bOutActive);
+		static FVector3d ClosestPointOnSegment(const FVector3d& Point, const FVector3d& Start, const FVector3d& End);
 		void ProjectParticleFriction(
 			int32 ParticleIndex,
 			TConstArrayView<FContactConstraint> Contacts,
@@ -233,6 +242,7 @@ namespace CableSim
 		TArray<FContactDiagnostic> LastContactDiagnostics;
 		TArray<bool> ProjectedContacts;
 		TArray<bool> ActiveContacts;
+		TArray<FVector3d> ContactEffectiveNormals;
 		TArray<double> ContactNormalCorrections;
 		TArray<double> ParticleStaticFrictionCorrections;
 		TArray<double> ParticleDynamicFrictionVelocityChanges;

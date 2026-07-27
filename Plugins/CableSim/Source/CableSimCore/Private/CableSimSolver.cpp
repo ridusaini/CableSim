@@ -102,6 +102,7 @@ namespace CableSim
 		LastContactDiagnostics.Reset();
 		ProjectedContacts.Reset();
 		ActiveContacts.Reset();
+		ContactEffectiveNormals.Reset();
 		ContactNormalCorrections.Reset();
 		ParticleStaticFrictionCorrections.Reset();
 		ParticleDynamicFrictionVelocityChanges.Reset();
@@ -219,6 +220,7 @@ namespace CableSim
 
 		ProjectedContacts.Init(false, Contacts.Num());
 		ActiveContacts.Init(false, Contacts.Num());
+		ContactEffectiveNormals.Init(FVector3d::ZeroVector, Contacts.Num());
 		ContactNormalCorrections.Init(0.0, Contacts.Num());
 		TArray<double> AccumulatedStaticCorrections;
 		AccumulatedStaticCorrections.Init(0.0, Particles.Num());
@@ -257,17 +259,17 @@ namespace CableSim
 			}
 			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 			{
-				const FContactConstraint& Contact = Contacts[ContactIndex];
-				const double Correction = ProjectContactConstraint(Contact);
+				FVector3d EffectiveNormal = Contacts[ContactIndex].Normal;
+				bool bActive = false;
+				const double Correction = ProjectContactConstraint(
+					Contacts[ContactIndex], EffectiveNormal, bActive);
+				ContactEffectiveNormals[ContactIndex] = EffectiveNormal;
 				if (Correction > 0.0)
 				{
 					ProjectedContacts[ContactIndex] = true;
 					ContactNormalCorrections[ContactIndex] += Correction;
 				}
-				const double Separation = FVector3d::DotProduct(
-					Particles[Contact.ParticleIndex].Position, Contact.Normal)
-					- Contact.MinimumNormalCoordinate;
-				if (Separation <= Config.ContactActiveBand)
+				if (bActive)
 				{
 					ActiveContacts[ContactIndex] = true;
 				}
@@ -297,6 +299,7 @@ namespace CableSim
 				Contacts = MoveTemp(RefreshedContacts);
 				ProjectedContacts.Init(false, Contacts.Num());
 				ActiveContacts.Init(false, Contacts.Num());
+				ContactEffectiveNormals.Init(FVector3d::ZeroVector, Contacts.Num());
 				ContactNormalCorrections.Init(0.0, Contacts.Num());
 			}
 		}
@@ -594,11 +597,61 @@ namespace CableSim
 		Last.Position += CorrectionDirection * (FirstSpan * LastWeight * Magnitude);
 	}
 
-	double FSolver::ProjectContactConstraint(const FContactConstraint& Contact)
+	FVector3d FSolver::ClosestPointOnSegment(
+		const FVector3d& Point, const FVector3d& Start, const FVector3d& End)
+	{
+		const FVector3d Direction = End - Start;
+		const double LengthSquared = Direction.SizeSquared();
+		if (LengthSquared <= 1.e-12)
+		{
+			return Start;
+		}
+		const double T = FMath::Clamp(
+			FVector3d::DotProduct(Point - Start, Direction) / LengthSquared, 0.0, 1.0);
+		return Start + Direction * T;
+	}
+
+	double FSolver::ProjectContactConstraint(
+		const FContactConstraint& Contact, FVector3d& OutEffectiveNormal, bool& bOutActive)
 	{
 		FParticle& Particle = Particles[Contact.ParticleIndex];
+		const double Band = FMath::Max(Config.ContactActiveBand, 0.0);
+		if (Contact.bConvexEdge)
+		{
+			const FVector3d Closest = ClosestPointOnSegment(Particle.Position, Contact.EdgeStart, Contact.EdgeEnd);
+			const FVector3d Radial = Particle.Position - Closest;
+			const double Distance = Radial.Length();
+			if (Distance <= 1.e-9)
+			{
+				OutEffectiveNormal = Contact.Normal;
+				bOutActive = false;
+				return 0.0;
+			}
+			const FVector3d RadialDirection = Radial / Distance;
+			OutEffectiveNormal = RadialDirection;
+			// Acts only in the exterior wedge between the two faces; over a face a
+			// face plane handles the node. Recomputed each iteration so it curves.
+			const bool bInWedge = FVector3d::DotProduct(RadialDirection, Contact.Normal) > 0.0
+				&& FVector3d::DotProduct(RadialDirection, Contact.SecondNormal) > 0.0;
+			if (!bInWedge)
+			{
+				bOutActive = false;
+				return 0.0;
+			}
+			bOutActive = (Distance - Contact.EdgeRadius) <= Band;
+			const double Penetration = Contact.EdgeRadius - Distance;
+			if (Penetration > 0.0)
+			{
+				Particle.Position += RadialDirection * Penetration;
+				return Penetration;
+			}
+			return 0.0;
+		}
+
+		OutEffectiveNormal = Contact.Normal;
 		const double Penetration = Contact.MinimumNormalCoordinate
 			- FVector3d::DotProduct(Particle.Position, Contact.Normal);
+		bOutActive = Penetration >= -Band;
 		if (Penetration > 0.0)
 		{
 			Particle.Position += Contact.Normal * Penetration;
@@ -632,7 +685,7 @@ namespace CableSim
 			{
 				continue;
 			}
-			AddOrthonormalNormal(Contact.Normal, Normals);
+			AddOrthonormalNormal(ContactEffectiveNormals[ContactIndex], Normals);
 			bGripsEdge |= Contact.bConvexEdge;
 			if (Contact.bHasFrictionAnchor)
 			{
@@ -715,7 +768,7 @@ namespace CableSim
 				{
 					continue;
 				}
-				AddOrthonormalNormal(Contacts[ContactIndex].Normal, Normals);
+				AddOrthonormalNormal(ContactEffectiveNormals[ContactIndex], Normals);
 				SurfaceVelocity += Contacts[ContactIndex].SurfaceVelocity;
 				++ActiveCount;
 			}
@@ -765,7 +818,9 @@ namespace CableSim
 			{
 				const int32 ParticleIndex = Contacts[ContactIndex].ParticleIndex;
 				HasActiveContact[ParticleIndex] = true;
-				AverageNormals[ParticleIndex] += Contacts[ContactIndex].Normal;
+				AverageNormals[ParticleIndex] += ContactEffectiveNormals.IsValidIndex(ContactIndex)
+					? ContactEffectiveNormals[ContactIndex]
+					: Contacts[ContactIndex].Normal;
 			}
 		}
 
@@ -894,6 +949,12 @@ namespace CableSim
 				Contacts.RemoveAt(Index, 1, EAllowShrinking::No);
 				continue;
 			}
+			if (Contact.bConvexEdge)
+			{
+				// Edge contacts are a distance-to-line constraint, not a plane; the
+				// plane-reachability cull below does not apply.
+				continue;
+			}
 			bool bHasKinematicReference = false;
 			bool bPlaneIsReachable = false;
 			for (const int32 EndpointIndex : {0, InParticles.Num() - 1})
@@ -952,10 +1013,20 @@ namespace CableSim
 		double MaximumPenetration = 0.0;
 		for (const FContactConstraint& Contact : Contacts)
 		{
-			MaximumPenetration = FMath::Max(
-				MaximumPenetration,
-				Contact.MinimumNormalCoordinate
-					- FVector3d::DotProduct(Particles[Contact.ParticleIndex].Position, Contact.Normal));
+			double Penetration;
+			if (Contact.bConvexEdge)
+			{
+				const FVector3d Closest = ClosestPointOnSegment(
+					Particles[Contact.ParticleIndex].Position, Contact.EdgeStart, Contact.EdgeEnd);
+				Penetration = Contact.EdgeRadius
+					- FVector3d::Distance(Particles[Contact.ParticleIndex].Position, Closest);
+			}
+			else
+			{
+				Penetration = Contact.MinimumNormalCoordinate
+					- FVector3d::DotProduct(Particles[Contact.ParticleIndex].Position, Contact.Normal);
+			}
+			MaximumPenetration = FMath::Max(MaximumPenetration, Penetration);
 		}
 		return FMath::Max(MaximumPenetration, 0.0);
 	}
