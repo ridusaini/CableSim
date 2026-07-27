@@ -23,27 +23,76 @@ namespace
 	constexpr int32 MaximumShapes = 512;
 	constexpr int32 MaximumTriangles = 4096;
 
-	FBox BuildQueryBounds(
+	void BuildSegmentBounds(
 		const TConstArrayView<CableSim::FParticle> Particles,
 		const FVector3d& StartTarget,
 		const FVector3d& EndTarget,
-		const double Padding)
+		const double Padding,
+		TArray<FBox>& OutSegmentBounds)
 	{
-		FBox Bounds(ForceInit);
-		for (const CableSim::FParticle& Particle : Particles)
+		const double SafePadding = FMath::Max(Padding, 0.1);
+		const int32 LastParticle = Particles.Num() - 1;
+		OutSegmentBounds.Reset(FMath::Max(LastParticle, 0));
+		for (int32 Index = 0; Index < LastParticle; ++Index)
 		{
-			Bounds += FVector(Particle.PreviousPosition);
-			Bounds += FVector(Particle.Position);
+			FBox Segment(ForceInit);
+			Segment += FVector(Particles[Index].PreviousPosition);
+			Segment += FVector(Particles[Index].Position);
+			Segment += FVector(Particles[Index + 1].PreviousPosition);
+			Segment += FVector(Particles[Index + 1].Position);
+			if (Index == 0)
+			{
+				Segment += FVector(StartTarget);
+			}
+			if (Index + 1 == LastParticle)
+			{
+				Segment += FVector(EndTarget);
+			}
+			OutSegmentBounds.Add(Segment.ExpandBy(SafePadding));
 		}
-		Bounds += FVector(StartTarget);
-		Bounds += FVector(EndTarget);
-		return Bounds.ExpandBy(FMath::Max(Padding, 0.1));
 	}
 
-	bool Intersects(const Chaos::FAABB3& Bounds, const FBox& QueryBounds)
+	FBox UnionBounds(TConstArrayView<FBox> SegmentBounds)
+	{
+		FBox Union(ForceInit);
+		for (const FBox& Segment : SegmentBounds)
+		{
+			Union += Segment;
+		}
+		return Union;
+	}
+
+	bool IntersectsAny(const Chaos::FAABB3& Bounds, TConstArrayView<FBox> SegmentBounds)
 	{
 		const FBox ShapeBounds(FVector(Bounds.Min()), FVector(Bounds.Max()));
-		return ShapeBounds.Intersect(QueryBounds);
+		for (const FBox& Segment : SegmentBounds)
+		{
+			if (ShapeBounds.Intersect(Segment))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool TriangleNearSegments(
+		const FVector3d& Position0,
+		const FVector3d& Position1,
+		const FVector3d& Position2,
+		TConstArrayView<FBox> SegmentBounds)
+	{
+		FBox TriangleBounds(ForceInit);
+		TriangleBounds += FVector(Position0);
+		TriangleBounds += FVector(Position1);
+		TriangleBounds += FVector(Position2);
+		for (const FBox& Segment : SegmentBounds)
+		{
+			if (Segment.Intersect(TriangleBounds))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	Chaos::FAABB3 TransformBoundsToLocal(const FBox& WorldBounds, const FTransform& LocalToWorld)
@@ -72,8 +121,13 @@ namespace
 		const FVector3d& Position2,
 		const CableSim::ECollisionGeometryType GeometryType,
 		const bool bStaticObject,
+		const TConstArrayView<FBox> SegmentBounds,
 		TArray<CableSim::FCollisionTriangle>& OutTriangles)
 	{
+		if (!TriangleNearSegments(Position0, Position1, Position2, SegmentBounds))
+		{
+			return;
+		}
 		CableSim::FCollisionTriangle& Triangle = OutTriangles.AddDefaulted_GetRef();
 		Triangle.Id = {
 			ObjectToken,
@@ -97,6 +151,7 @@ namespace
 		const uint64 ObjectToken,
 		const int32 ShapeIndex,
 		const bool bStaticObject,
+		const TConstArrayView<FBox> SegmentBounds,
 		TArray<CableSim::FCollisionTriangle>& OutTriangles)
 	{
 		const FVector3d Min(Box.Min());
@@ -133,6 +188,7 @@ namespace
 				Vertices[Indices[TriangleIndex][2]],
 				CableSim::ECollisionGeometryType::Box,
 				bStaticObject,
+				SegmentBounds,
 				OutTriangles);
 		}
 	}
@@ -144,6 +200,7 @@ namespace
 		const uint64 ObjectToken,
 		const int32 ShapeIndex,
 		const bool bStaticObject,
+		const TConstArrayView<FBox> SegmentBounds,
 		TArray<CableSim::FCollisionTriangle>& OutTriangles)
 	{
 		int32 TriangleIndex = 0;
@@ -180,6 +237,7 @@ namespace
 					Positions[2],
 					CableSim::ECollisionGeometryType::Convex,
 					bStaticObject,
+					SegmentBounds,
 					OutTriangles);
 			}
 		}
@@ -226,6 +284,7 @@ namespace
 		const uint64 ObjectToken,
 		const int32 ShapeIndex,
 		const bool bStaticObject,
+		const TConstArrayView<FBox> SegmentBounds,
 		TArray<CableSim::FCollisionTriangle>& OutTriangles)
 	{
 		FTransform LocalToWorld = ObjectTransform;
@@ -245,6 +304,7 @@ namespace
 				ObjectToken,
 				ShapeIndex,
 				bStaticObject,
+				SegmentBounds,
 				OutTriangles);
 			return true;
 		}
@@ -259,6 +319,7 @@ namespace
 				ObjectToken,
 				ShapeIndex,
 				bStaticObject,
+				SegmentBounds,
 				OutTriangles);
 			return true;
 		}
@@ -268,7 +329,7 @@ namespace
 		{
 			const auto& Mesh = Geometry->GetObjectChecked<Chaos::FTriangleMeshImplicitObject>();
 			Mesh.VisitTriangles(LocalBounds, Chaos::FRigidTransform3(LocalToWorld),
-				[&OutTriangles, ObjectToken, ShapeIndex, bStaticObject](
+				[&OutTriangles, ObjectToken, ShapeIndex, bStaticObject, SegmentBounds](
 					const Chaos::FTriangle& Triangle,
 					const int32 TriangleIndex,
 					const int32 Vertex0,
@@ -283,6 +344,7 @@ namespace
 							FVector3d(Triangle[0]), FVector3d(Triangle[1]), FVector3d(Triangle[2]),
 							CableSim::ECollisionGeometryType::TriangleMesh,
 							bStaticObject,
+							SegmentBounds,
 							OutTriangles);
 					}
 				});
@@ -292,7 +354,7 @@ namespace
 		{
 			const auto& HeightField = Geometry->GetObjectChecked<Chaos::FHeightField>();
 			HeightField.VisitTriangles(LocalBounds, Chaos::FRigidTransform3(LocalToWorld),
-				[&OutTriangles, ObjectToken, ShapeIndex, bStaticObject](
+				[&OutTriangles, ObjectToken, ShapeIndex, bStaticObject, SegmentBounds](
 					const Chaos::FTriangle& Triangle,
 					const int32 TriangleIndex,
 					const int32 Vertex0,
@@ -307,6 +369,7 @@ namespace
 							FVector3d(Triangle[0]), FVector3d(Triangle[1]), FVector3d(Triangle[2]),
 							CableSim::ECollisionGeometryType::HeightField,
 							bStaticObject,
+							SegmentBounds,
 							OutTriangles);
 					}
 				});
@@ -394,11 +457,14 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 	}
 	ObjectTracker.BeginSnapshot();
 	const double StartTime = FPlatformTime::Seconds();
-	OutSnapshot.QueryBounds = BuildQueryBounds(
+	TArray<FBox> SegmentBounds;
+	BuildSegmentBounds(
 		Particles,
 		StartTarget,
 		EndTarget,
-		CollisionSettings.Radius + TopologyTolerance);
+		CollisionSettings.Radius + TopologyTolerance,
+		SegmentBounds);
+	OutSnapshot.QueryBounds = UnionBounds(SegmentBounds);
 
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(CableSimChaosTopology), false, Owner);
 	for (AActor* IgnoredActor : IgnoredActors)
@@ -477,7 +543,7 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 					OutSnapshot.Diagnostics.bFeatureBudgetExceeded = true;
 					return true;
 				}
-				if (!Shape || !Shape->GetQueryEnabled() || !Intersects(Shape->GetWorldSpaceShapeBounds(), OutSnapshot.QueryBounds))
+				if (!Shape || !Shape->GetQueryEnabled() || !IntersectsAny(Shape->GetWorldSpaceShapeBounds(), SegmentBounds))
 				{
 					return false;
 				}
@@ -497,6 +563,7 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 					ObjectToken,
 					Shape->GetShapeIndex(),
 					bStaticObject,
+					SegmentBounds,
 					OutSnapshot.Triangles))
 				{
 					++OutSnapshot.Diagnostics.UnsupportedShapeCount;
