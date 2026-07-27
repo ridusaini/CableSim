@@ -207,13 +207,12 @@ namespace CableSim
 				continue;
 			}
 			const double PlaneOffset = FVector3d::DotProduct(Triangle.Vertices[0], Normal);
+			// Drop a back face the node sat well behind at the start of the step.
 			if (FVector3d::DotProduct(NodePreviousPosition, Normal) - PlaneOffset < -Radius)
 			{
 				continue;
 			}
-			// A finite face supports only nodes over its interior; when the closest
-			// point lands on a boundary edge the convex edge owns the contact, so the
-			// face must not act as an infinite plane and eject the node.
+			// A finite face owns only its interior; the convex edge owns the boundary.
 			const double PerpendicularDistance = FMath::Abs(
 				FVector3d::DotProduct(NodePosition, Normal) - PlaneOffset);
 			if (Distance > PerpendicularDistance + Config.Tolerance)
