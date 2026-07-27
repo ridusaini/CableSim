@@ -46,7 +46,6 @@ namespace CableSim
 			&& FMath::IsNearlyEqual(StaticFrictionCoefficient, Other.StaticFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(DynamicFrictionCoefficient, Other.DynamicFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance)
-			&& FMath::IsNearlyEqual(EdgeFrictionScale, Other.EdgeFrictionScale, Tolerance)
 			&& FMath::IsNearlyEqual(ContactActiveBand, Other.ContactActiveBand, Tolerance);
 	}
 
@@ -257,6 +256,21 @@ namespace CableSim
 						IterationStrength);
 				}
 			}
+			for (const FGuideConstraint& Guide : Guides)
+			{
+				const double IterationStrength = CalculateIterationStrength(
+					Guide.StepStrength,
+					Config.ConstraintIterations);
+				ProjectGuideConstraint(Guide, IterationStrength);
+			}
+			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
+			{
+				ProjectParticleFriction(
+					ParticleIndex,
+					Contacts,
+					AccumulatedStaticCorrections,
+					Input.DeltaTime);
+			}
 			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 			{
 				FVector3d EffectiveNormal = Contacts[ContactIndex].Normal;
@@ -273,34 +287,6 @@ namespace CableSim
 				{
 					ActiveContacts[ContactIndex] = true;
 				}
-			}
-			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
-			{
-				ProjectParticleFriction(
-					ParticleIndex,
-					Contacts,
-					AccumulatedStaticCorrections,
-					Input.DeltaTime);
-			}
-			for (const FGuideConstraint& Guide : Guides)
-			{
-				const double IterationStrength = CalculateIterationStrength(
-					Guide.StepStrength,
-					Config.ConstraintIterations);
-				ProjectGuideConstraint(Guide, IterationStrength);
-			}
-			if (ContactGenerator && Config.bRefreshContactsMidSolve && Config.ConstraintIterations > 1
-				&& Iteration + 1 == Config.ConstraintIterations / 2)
-			{
-				TArray<FContactConstraint> RefreshedContacts;
-				ContactGenerator(Particles, RefreshedContacts);
-				SanitizeContacts(Particles, RefreshedContacts);
-				RefreshedContactCount = RefreshedContacts.Num();
-				Contacts = MoveTemp(RefreshedContacts);
-				ProjectedContacts.Init(false, Contacts.Num());
-				ActiveContacts.Init(false, Contacts.Num());
-				ContactEffectiveNormals.Init(FVector3d::ZeroVector, Contacts.Num());
-				ContactNormalCorrections.Init(0.0, Contacts.Num());
 			}
 		}
 
@@ -416,7 +402,6 @@ namespace CableSim
 			&& FMath::IsFinite(InConfig.StaticFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.DynamicFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold)
-			&& FMath::IsFinite(InConfig.EdgeFrictionScale)
 			&& FMath::IsFinite(InConfig.ContactActiveBand);
 	}
 
@@ -434,7 +419,6 @@ namespace CableSim
 		Result.StaticFrictionCoefficient = FMath::Max(Result.StaticFrictionCoefficient, 0.0);
 		Result.DynamicFrictionCoefficient = FMath::Max(Result.DynamicFrictionCoefficient, 0.0);
 		Result.StaticFrictionSpeedThreshold = FMath::Max(Result.StaticFrictionSpeedThreshold, 0.0);
-		Result.EdgeFrictionScale = FMath::Max(Result.EdgeFrictionScale, 1.0);
 		Result.ContactActiveBand = FMath::Max(Result.ContactActiveBand, 0.0);
 		return Result;
 	}
@@ -673,7 +657,6 @@ namespace CableSim
 		TArray<FVector3d, TInlineAllocator<3>> Normals;
 		FVector3d AverageAnchor = FVector3d::ZeroVector;
 		int32 AnchorCount = 0;
-		bool bGripsEdge = false;
 		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
 		{
 			const FContactConstraint& Contact = Contacts[ContactIndex];
@@ -684,7 +667,6 @@ namespace CableSim
 				continue;
 			}
 			AddOrthonormalNormal(ContactEffectiveNormals[ContactIndex], Normals);
-			bGripsEdge |= Contact.bConvexEdge;
 			if (Contact.bHasFrictionAnchor)
 			{
 				AverageAnchor += Contact.FrictionAnchorPosition;
@@ -710,8 +692,7 @@ namespace CableSim
 		{
 			return;
 		}
-		const double EdgeScale = bGripsEdge ? FMath::Max(Config.EdgeFrictionScale, 1.0) : 1.0;
-		const double StepBudget = Config.StaticFrictionCoefficient * EdgeScale
+		const double StepBudget = Config.StaticFrictionCoefficient
 			* Particle.EstimatedNormalLoad / Mass * 100.0 * DeltaTime * DeltaTime;
 		const double RemainingBudget = FMath::Max(
 			StepBudget - AccumulatedStaticCorrections[ParticleIndex],

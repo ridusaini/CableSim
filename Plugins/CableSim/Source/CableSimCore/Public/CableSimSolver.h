@@ -55,9 +55,7 @@ namespace CableSim
 		double StaticFrictionCoefficient = 0.35;
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
-		double EdgeFrictionScale = 1.0;
 		double ContactActiveBand = 1.0;
-		bool bRefreshContactsMidSolve = true;
 
 		bool Equals(const FSimulationConfig& Other, double Tolerance = 1.e-9) const;
 	};

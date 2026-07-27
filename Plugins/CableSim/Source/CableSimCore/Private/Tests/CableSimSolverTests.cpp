@@ -478,11 +478,11 @@ bool FCableSimInSolverFrictionTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimContactRefreshReplacementTest,
-	"CableSim.Core.Collision.RefreshReplacesActiveSet",
+	FCableSimOneManifoldPerStepTest,
+	"CableSim.Core.Collision.OneManifoldPerStep",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FCableSimContactRefreshReplacementTest::RunTest(const FString& Parameters)
+bool FCableSimOneManifoldPerStepTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig(20.0, 10.0);
 	Config.ConstraintIterations = 4;
@@ -493,18 +493,15 @@ bool FCableSimContactRefreshReplacementTest::RunTest(const FString& Parameters)
 		CableSimTests::MakeFreeInput(),
 		[&GeneratorCallCount](const TConstArrayView<CableSim::FParticle>, TArray<CableSim::FContactConstraint>& Contacts)
 		{
-			if (GeneratorCallCount++ == 0)
-			{
-				CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
-				Contact.FeatureId = 7;
-				Contact.ParticleIndex = 1;
-				Contact.Normal = FVector3d::UnitZ();
-				Contact.MinimumNormalCoordinate = 1.0;
-			}
+			++GeneratorCallCount;
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = 7;
+			Contact.ParticleIndex = 1;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = 1.0;
 		});
-	TestEqual(TEXT("Generator runs at integration and midpoint"), GeneratorCallCount, 2);
-	TestEqual(TEXT("Midpoint refresh removes stale active contacts"), Result.ContactCount, 0);
-	TestEqual(TEXT("Refresh count reports the replacement set"), Result.RefreshedContactCount, 0);
+	TestEqual(TEXT("Contacts are generated once per step"), GeneratorCallCount, 1);
+	TestEqual(TEXT("The single contact set is kept for the whole step"), Result.ContactCount, 1);
 	return true;
 }
 
@@ -786,63 +783,6 @@ bool FCableSimRestingOnPlaneTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimRestingOverEdgeTest,
-	"CableSim.Core.Resting.OverConvexEdge",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCableSimRestingOverEdgeTest::RunTest(const FString& Parameters)
-{
-	// Cable draped over a convex ridge (two inclined planes meeting at an apex
-	// along Y): a tangential gravity component exists, so friction must hold it.
-	const FVector3d Start(-150.0, 0.0, 120.0);
-	const FVector3d End(150.0, 0.0, 120.0);
-	CableSim::FSolver Solver;
-	TestTrue(TEXT("Over-edge solver initializes"),
-		Solver.Initialize(Start, End, CableSimTests::MakeSettleConfig()));
-	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
-	const FVector3d LeftNormal = FVector3d(-1.0, 0.0, 1.0).GetSafeNormal();
-	const FVector3d RightNormal = FVector3d(1.0, 0.0, 1.0).GetSafeNormal();
-	const CableSim::FContactGenerator Ridge =
-		[LeftNormal, RightNormal](const TConstArrayView<CableSim::FParticle> Particles,
-			TArray<CableSim::FContactConstraint>& Contacts)
-	{
-		auto EmitIfNear = [&Contacts, &Particles](
-			const int32 Index, const FVector3d& Normal, const uint64 FeatureId)
-		{
-			if (FVector3d::DotProduct(Particles[Index].Position, Normal) > 0.5)
-			{
-				return;
-			}
-			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
-			Contact.FeatureId = FeatureId;
-			Contact.ParticleIndex = Index;
-			Contact.Normal = Normal;
-			Contact.MinimumNormalCoordinate = 0.0;
-			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
-			Contact.bHasFrictionAnchor = true;
-		};
-		for (int32 Index = 0; Index < Particles.Num(); ++Index)
-		{
-			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
-			{
-				continue;
-			}
-			EmitIfNear(Index, LeftNormal, static_cast<uint64>(Index) << 1);
-			EmitIfNear(Index, RightNormal, (static_cast<uint64>(Index) << 1) | 1);
-		}
-	};
-	const CableSimTests::FSettleMetrics Metrics =
-		CableSimTests::RunSettle(Solver, Input, 900, 120, Ridge);
-	AddInfo(FString::Printf(
-		TEXT("R3 over-edge: window-avg RMS %.4f cm/s, window-max %.4f cm/s"),
-		Metrics.WindowAverageRmsSpeed, Metrics.WindowMaxSpeed));
-	TestFalse(TEXT("Over-edge cable does not suspend"), Solver.IsSuspended());
-	TestTrue(TEXT("Over-edge cable settles (RMS < 3 cm/s)"),
-		Metrics.WindowAverageRmsSpeed < 3.0);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimStaticFrictionSlopeTest,
 	"CableSim.Core.Friction.StaticHoldsOnSlope",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1069,6 +1009,90 @@ bool FCableSimDrapeOverEdgeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Middle node rests on the ridge, not down a slope"),
 		FMath::Abs(MiddleNode.X) < 15.0 && MiddleNode.Z > -15.0);
 	TestTrue(TEXT("Drape settles without bouncing (RMS < 3 cm/s)"), WindowRms < 3.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautRestBuzzTest,
+	"CableSim.Core.Resting.NearlyTautOnPlane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautRestBuzzTest::RunTest(const FString& Parameters)
+{
+	auto MakeTri = [](const int32 Index, const int32 I0, const int32 I1, const int32 I2,
+		const FVector3d& A, const FVector3d& B, const FVector3d& C)
+	{
+		CableSim::FCollisionTriangle Triangle;
+		Triangle.Id = {1, 0, CableSim::ECollisionFeatureType::Triangle, Index, INDEX_NONE};
+		Triangle.GeometryType = CableSim::ECollisionGeometryType::TriangleMesh;
+		Triangle.bStaticObject = true;
+		Triangle.Vertices[0] = A;
+		Triangle.Vertices[1] = B;
+		Triangle.Vertices[2] = C;
+		Triangle.VertexIndices[0] = I0;
+		Triangle.VertexIndices[1] = I1;
+		Triangle.VertexIndices[2] = I2;
+		return Triangle;
+	};
+	// Flat top (+Z) meeting a down-ramp (normal ~0.26,0,0.97) at a convex bend along Y,
+	// matching the live scene's contact normals.
+	const FVector3d A(-120, -60, 0), B(-120, 60, 0), C(0, -60, 0), D(0, 60, 0), E(120, -60, -32), F(120, 60, -32);
+	TArray<CableSim::FCollisionTriangle> Triangles;
+	Triangles.Add(MakeTri(0, 0, 3, 1, A, D, B));
+	Triangles.Add(MakeTri(1, 0, 2, 3, A, C, D));
+	Triangles.Add(MakeTri(2, 2, 5, 3, C, F, D));
+	Triangles.Add(MakeTri(3, 2, 4, 5, C, E, F));
+	TArray<CableSim::FCollisionEdge> Edges;
+	TArray<CableSim::FCollisionVertex> Verts;
+	CableSim::FCollisionTopologyCompiler::CompileTopology(Triangles, 0.1, 8, Edges, Verts);
+
+	const FVector3d Start(-120.0, 0.0, 5.0);
+	const FVector3d End(120.0, 0.0, -27.0);
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Solver initializes"),
+		Solver.Initialize(Start, End, CableSimTests::MakeSettleConfig(248.0, 10.0)));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	CableSim::FManifoldConfig ManifoldConfig;
+	// The live Chaos snapshot concatenates triangles from several objects in an order
+	// that varies frame to frame; reproduce that by shuffling the input order each step.
+	int32 StepSeed = 0;
+	const CableSim::FContactGenerator Generator =
+		[&Triangles, &Edges, ManifoldConfig, &StepSeed](const TConstArrayView<CableSim::FParticle> Particles,
+			TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		TArray<CableSim::FCollisionTriangle> Shuffled = Triangles;
+		FRandomStream Random(StepSeed);
+		for (int32 I = Shuffled.Num() - 1; I > 0; --I)
+		{
+			Shuffled.Swap(I, Random.RandRange(0, I));
+		}
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode == CableSim::EParticleMode::Dynamic)
+			{
+				CableSim::FContactManifoldCompiler::CompileNodeContacts(
+					Index, Particles[Index].Position, Particles[Index].PreviousPosition,
+					Shuffled, Edges, ManifoldConfig, Contacts);
+			}
+		}
+	};
+	double WindowRms = 0.0;
+	double WindowMax = 0.0;
+	for (int32 Step = 0; Step < 900; ++Step)
+	{
+		StepSeed = Step;
+		const CableSim::FStepResult Result = Solver.AdvanceStep(Input, Generator);
+		if (Step >= 780)
+		{
+			WindowRms += Result.RmsParticleSpeed;
+			WindowMax = FMath::Max(WindowMax, Result.MaximumParticleSpeed);
+		}
+	}
+	WindowRms /= 120.0;
+	AddInfo(FString::Printf(
+		TEXT("Nearly-taut over bend (shuffled snapshot): window-avg RMS %.4f cm/s, window-max %.4f cm/s"),
+		WindowRms, WindowMax));
+	TestTrue(TEXT("Nearly-taut cable over a convex bend settles (RMS < 2 cm/s)"), WindowRms < 2.0);
 	return true;
 }
 
