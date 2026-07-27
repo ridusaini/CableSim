@@ -211,6 +211,15 @@ namespace CableSim
 			{
 				continue;
 			}
+			// A finite face supports only nodes over its interior; when the closest
+			// point lands on a boundary edge the convex edge owns the contact, so the
+			// face must not act as an infinite plane and eject the node.
+			const double PerpendicularDistance = FMath::Abs(
+				FVector3d::DotProduct(NodePosition, Normal) - PlaneOffset);
+			if (Distance > PerpendicularDistance + Config.Tolerance)
+			{
+				continue;
+			}
 			bool bSuppressed = false;
 			for (const FVector3d& Suppressed : SuppressedNormals)
 			{

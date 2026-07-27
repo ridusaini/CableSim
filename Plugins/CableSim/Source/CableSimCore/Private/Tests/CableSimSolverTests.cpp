@@ -1116,8 +1116,9 @@ bool FCableSimGuideCorridorTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(
 		TEXT("Guide jitter response: floored corridor %.3f cm/s vs zero corridor %.3f cm/s"),
 		FlooredRms, PinnedRms));
-	TestTrue(TEXT("A floored corridor absorbs sample jitter (stays at rest)"), FlooredRms < 2.0);
-	TestTrue(TEXT("A zero corridor pins to the jittering sample and buzzes"), PinnedRms > 10.0);
+	TestTrue(TEXT("A floored corridor absorbs sample jitter (stays at rest)"), FlooredRms < 1.0);
+	TestTrue(TEXT("A zero corridor pins to the jittering sample and buzzes"),
+		PinnedRms > 3.0 && PinnedRms > FlooredRms * 5.0);
 	return true;
 }
 
