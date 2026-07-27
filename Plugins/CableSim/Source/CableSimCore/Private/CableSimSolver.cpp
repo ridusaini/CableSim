@@ -225,7 +225,6 @@ namespace CableSim
 		AccumulatedStaticCorrections.Init(0.0, Particles.Num());
 		ParticleStaticFrictionCorrections.Init(0.0, Particles.Num());
 		ParticleDynamicFrictionVelocityChanges.Init(0.0, Particles.Num());
-		int32 RefreshedContactCount = 0;
 		for (int32 Iteration = 0; Iteration < Config.ConstraintIterations; ++Iteration)
 		{
 			if ((Iteration & 1) == 0)
@@ -321,7 +320,7 @@ namespace CableSim
 			&& EndpointDistance > Config.RestLength + FeasibilityTolerance
 			? ESimulationStatus::Overextended
 			: ESimulationStatus::Ready;
-		UpdateStepResult(Status, EndpointDistance, Contacts, RefreshedContactCount, Guides);
+		UpdateStepResult(Status, EndpointDistance, Contacts, Guides);
 		LastReplayFrame.Input = Input;
 		LastReplayFrame.Contacts = Contacts;
 		return LastStepResult;
@@ -1019,7 +1018,6 @@ namespace CableSim
 		const ESimulationStatus Status,
 		const double EndpointDistance,
 		const TArray<FContactConstraint>& Contacts,
-		const int32 RefreshedContactCount,
 		const TArray<FGuideConstraint>& Guides)
 	{
 		LastStepResult.Status = Status;
@@ -1027,7 +1025,6 @@ namespace CableSim
 		LastStepResult.ParticleCount = Particles.Num();
 		LastStepResult.ConstraintIterations = Config.ConstraintIterations;
 		LastStepResult.ContactCount = Contacts.Num();
-		LastStepResult.RefreshedContactCount = RefreshedContactCount;
 		LastStepResult.GuideConstraintCount = Guides.Num();
 		LastStepResult.RestLength = Config.RestLength;
 		LastStepResult.EffectiveSolveLength = EffectiveSolveLength;

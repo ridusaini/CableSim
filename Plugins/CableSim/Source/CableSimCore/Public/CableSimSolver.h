@@ -122,7 +122,6 @@ namespace CableSim
 		int32 ParticleCount = 0;
 		int32 ConstraintIterations = 0;
 		int32 ContactCount = 0;
-		int32 RefreshedContactCount = 0;
 		int32 GuideConstraintCount = 0;
 		double RestLength = 0.0;
 		double EffectiveSolveLength = 0.0;
@@ -219,7 +218,6 @@ namespace CableSim
 			ESimulationStatus Status,
 			double EndpointDistance,
 			const TArray<FContactConstraint>& Contacts,
-			int32 RefreshedContactCount,
 			const TArray<FGuideConstraint>& Guides);
 
 		TArray<FParticle> Particles;
