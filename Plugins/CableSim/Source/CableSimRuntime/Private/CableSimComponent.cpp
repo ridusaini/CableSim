@@ -1,23 +1,136 @@
 #include "CableSimComponent.h"
 
-#include "CableSimEndpointResolver.h"
-#include "CableSimWorldCollisionAdapter.h"
-#include "Chaos/CableSimChaosCollisionAdapter.h"
+#include "CableSimSolver.h"
+#include "CableSimWorldCollisionProvider.h"
 #include "DebugRenderSceneProxy.h"
 #include "Engine/World.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "SceneManagement.h"
+#include "Serialization/CustomVersion.h"
 
-	namespace
+namespace
+{
+	const FGuid CableSimObjectVersionGuid(0x47F49E33, 0x084E48C4, 0xA8F536A2, 0x53338B17);
+	enum class ECableSimObjectVersion : int32
 	{
-	class FCableSimDebugRenderSceneProxy final : public FDebugRenderSceneProxy
+		BeforeLinearDensity = 0,
+		LinearDensity = 1,
+		Latest = LinearDensity
+	};
+	FCustomVersionRegistration CableSimObjectVersionRegistration(
+		CableSimObjectVersionGuid,
+		static_cast<int32>(ECableSimObjectVersion::Latest),
+		TEXT("CableSimObjectVersion"));
+
+	class FCableSimDebugProxy final : public FDebugRenderSceneProxy
 	{
 	public:
-		explicit FCableSimDebugRenderSceneProxy(const UPrimitiveComponent* Component)
+		FCableSimDebugProxy(
+			const UPrimitiveComponent* Component,
+			const TConstArrayView<FVector3d> Polyline,
+			const TConstArrayView<FVector3d> ContactPoints,
+			const TConstArrayView<FVector3d> RejectedPoints,
+			const FCableSimCollisionSnapshot& CollisionSnapshot,
+			const FCableSimDebugSettings& Settings,
+			const FCableSimStatus& Status)
 			: FDebugRenderSceneProxy(Component)
 		{
 			DrawType = EDrawType::WireMesh;
 			DrawAlpha = 255;
+			for (int32 Index = 0; Index + 1 < Polyline.Num(); ++Index)
+			{
+				Lines.Emplace(
+					FVector(Polyline[Index]),
+					FVector(Polyline[Index + 1]),
+					Settings.CableColor.ToFColor(true),
+					Settings.LineThickness);
+			}
+			if (Settings.bDrawParticles)
+			{
+				for (const FVector3d& Point : Polyline)
+				{
+					Spheres.Emplace(1.25f, FVector(Point), Settings.CableColor);
+				}
+			}
+			if (Settings.bDrawContacts)
+			{
+				for (const FVector3d& Point : ContactPoints)
+				{
+					Spheres.Emplace(2.25f, FVector(Point), FLinearColor::Yellow);
+				}
+			}
+			if (Settings.bDrawRejectedContacts)
+			{
+				for (const FVector3d& Point : RejectedPoints)
+				{
+					Spheres.Emplace(2.0f, FVector(Point), FLinearColor::Red);
+				}
+			}
+			if (Settings.bDrawCollisionGeometry)
+			{
+				for (const FCableSimNodeCollisionGeometry& Node : CollisionSnapshot.Nodes)
+				{
+					for (const CableSim::FCollisionTriangle& Triangle : Node.Triangles)
+					{
+						for (int32 Corner = 0; Corner < 3; ++Corner)
+						{
+							Lines.Emplace(
+								FVector(Triangle.Vertices[Corner]),
+								FVector(Triangle.Vertices[(Corner + 1) % 3]),
+								FColor(80, 80, 80),
+								0.5f);
+						}
+					}
+					for (const CableSim::FCollisionEdge& Edge : Node.Edges)
+					{
+						if (Edge.Kind == CableSim::ECollisionEdgeKind::Convex)
+						{
+							Lines.Emplace(FVector(Edge.Start), FVector(Edge.End), FColor::Orange, 1.5f);
+						}
+					}
+				}
+			}
+			if (Settings.bDrawPredictedBounds)
+			{
+				for (const FCableSimNodeCollisionGeometry& Node : CollisionSnapshot.Nodes)
+				{
+					const FVector Min = Node.PredictedBounds.Min;
+					const FVector Max = Node.PredictedBounds.Max;
+					FVector Corners[8];
+					for (int32 Corner = 0; Corner < 8; ++Corner)
+					{
+						Corners[Corner] = FVector(
+							(Corner & 1) ? Max.X : Min.X,
+							(Corner & 2) ? Max.Y : Min.Y,
+							(Corner & 4) ? Max.Z : Min.Z);
+					}
+					for (const int32 AxisBit : {1, 2, 4})
+						for (int32 Corner = 0; Corner < 8; ++Corner)
+							if ((Corner & AxisBit) == 0)
+								Lines.Emplace(Corners[Corner], Corners[Corner | AxisBit], FColor(40, 180, 220), 0.25f);
+				}
+			}
+			if (Settings.bDrawStatus && !Polyline.IsEmpty())
+			{
+				Texts.Emplace(
+					FString::Printf(
+						TEXT("CableSim  length=%.1f -> %.1f / %.1f  particles=%d  contacts=%d  strain=%.3f  accepted=%.2f  %.2f ms%s%s"),
+						Status.ActiveLength,
+						Status.TargetLength,
+						Status.MaximumLength,
+						Status.ParticleCount,
+						Status.ContactCount,
+						Status.MaximumSegmentStrain,
+						Status.AcceptedMovementFraction,
+						Status.SimulationMilliseconds,
+						Status.bMotionClamped ? TEXT("  MOVEMENT LIMITED") : TEXT(""),
+						Status.bBindingFailure ? TEXT("  BINDING INVALID") : TEXT("")),
+					FVector(Polyline[0]) + FVector(0.0, 0.0, 15.0),
+					Status.bMotionClamped ? FLinearColor::Yellow : FLinearColor::White);
+			}
 		}
 
 		virtual FPrimitiveViewRelevance GetViewRelevance(const FSceneView* View) const override
@@ -31,18 +144,30 @@
 		}
 	};
 
-	struct FEndpointFrameSample
+	CableSim::EEndpointState ToCoreState(const ECableSimEndpointState State)
 	{
-		FVector3d ConsumedPosition = FVector3d::ZeroVector;
-		FVector3d CurrentPosition = FVector3d::ZeroVector;
-		FVector3d Velocity = FVector3d::ZeroVector;
-	};
+		switch (State)
+		{
+		case ECableSimEndpointState::Fixed:
+			return CableSim::EEndpointState::Fixed;
+		case ECableSimEndpointState::Driven:
+			return CableSim::EEndpointState::Driven;
+		default:
+			return CableSim::EEndpointState::Free;
+		}
+	}
 
-	CableSim::EParticleMode ToCoreMode(const ECableSimEndpointMode Mode)
+	CableSim::ELengthChangeOrigin ToCoreLengthOrigin(const ECableSimLengthChangeOrigin Origin)
 	{
-		return Mode == ECableSimEndpointMode::Simulated
-			? CableSim::EParticleMode::Dynamic
-			: CableSim::EParticleMode::Kinematic;
+		switch (Origin)
+		{
+		case ECableSimLengthChangeOrigin::Start:
+			return CableSim::ELengthChangeOrigin::Start;
+		case ECableSimLengthChangeOrigin::Both:
+			return CableSim::ELengthChangeOrigin::Both;
+		default:
+			return CableSim::ELengthChangeOrigin::End;
+		}
 	}
 
 	ECableSimSimulationStatus ToRuntimeStatus(const CableSim::ESimulationStatus Status)
@@ -53,145 +178,112 @@
 			return ECableSimSimulationStatus::Ready;
 		case CableSim::ESimulationStatus::Overextended:
 			return ECableSimSimulationStatus::Overextended;
-		case CableSim::ESimulationStatus::NumericalFailure:
-			return ECableSimSimulationStatus::NumericalFailure;
+		case CableSim::ESimulationStatus::MovementLimited:
+			return ECableSimSimulationStatus::MovementLimited;
+		case CableSim::ESimulationStatus::ParticleBudgetExceeded:
+			return ECableSimSimulationStatus::ParticleBudgetExceeded;
+		case CableSim::ESimulationStatus::GeometryBudgetExceeded:
+			return ECableSimSimulationStatus::CollisionBudgetExceeded;
+		case CableSim::ESimulationStatus::InvalidInitialOverlap:
+			return ECableSimSimulationStatus::InvalidInitialOverlap;
+		case CableSim::ESimulationStatus::CollisionRecoveryFailed:
+			return ECableSimSimulationStatus::CollisionRecoveryFailed;
 		case CableSim::ESimulationStatus::InvalidConfiguration:
 			return ECableSimSimulationStatus::InvalidConfiguration;
+		case CableSim::ESimulationStatus::NumericalFailure:
+			return ECableSimSimulationStatus::NumericalFailure;
 		default:
 			return ECableSimSimulationStatus::Uninitialized;
 		}
 	}
 
-	ECableSimTautStatus ToRuntimeTautStatus(const CableSim::ETautStatus Status)
+	ECableSimEndpointState ToRuntimeState(const CableSim::EEndpointState State)
 	{
-		switch (Status)
+		switch (State)
 		{
-		case CableSim::ETautStatus::Ready:
-			return ECableSimTautStatus::Ready;
-		case CableSim::ETautStatus::NoRelevantGeometry:
-			return ECableSimTautStatus::NoRelevantGeometry;
-		case CableSim::ETautStatus::NonManifoldTopology:
-			return ECableSimTautStatus::NonManifoldTopology;
-		case CableSim::ETautStatus::TopologyOverValence:
-			return ECableSimTautStatus::TopologyOverValence;
-		case CableSim::ETautStatus::FeatureInvalidated:
-			return ECableSimTautStatus::FeatureInvalidated;
-		case CableSim::ETautStatus::IterationBudgetExceeded:
-			return ECableSimTautStatus::IterationBudgetExceeded;
-		case CableSim::ETautStatus::InvalidConfiguration:
-			return ECableSimTautStatus::InvalidConfiguration;
-		case CableSim::ETautStatus::NumericalFailure:
-			return ECableSimTautStatus::NumericalFailure;
+		case CableSim::EEndpointState::Fixed:
+			return ECableSimEndpointState::Fixed;
+		case CableSim::EEndpointState::Driven:
+			return ECableSimEndpointState::Driven;
 		default:
-			return ECableSimTautStatus::Uninitialized;
+			return ECableSimEndpointState::Free;
 		}
 	}
 
-	FColor GetEdgeDebugColor(const CableSim::ECollisionEdgeKind Kind)
+	double EffectiveMaximumCableLength(const FCableSimSimulationSettings& Simulation)
 	{
-		switch (Kind)
-		{
-		case CableSim::ECollisionEdgeKind::Convex:
-			return FColor::Green;
-		case CableSim::ECollisionEdgeKind::Concave:
-			return FColor::Red;
-		case CableSim::ECollisionEdgeKind::Coplanar:
-			return FColor::Blue;
-		case CableSim::ECollisionEdgeKind::Boundary:
-			return FColor::Yellow;
-		case CableSim::ECollisionEdgeKind::NonManifold:
-			return FColor(255, 0, 255);
-		default:
-			return FColor::Silver;
-		}
+		const double ParticleBudgetLength = FMath::Max(Simulation.NodeSpacing, 2.0)
+			* FMath::Max(FMath::Clamp(Simulation.MaximumParticles, 2, 4096) - 1, 1);
+		return FMath::Max(FMath::Min(Simulation.MaximumLength, ParticleBudgetLength), 1.0);
 	}
 
-	double CalculatePolylineLength(const TConstArrayView<CableSim::FTautPoint> Points)
+	CableSim::FSimulationConfig BuildCoreConfig(
+		const FCableSimSimulationSettings& Simulation,
+		const FCableSimFrictionSettings& Friction,
+		const FCableSimCollisionSettings& Collision)
 	{
-		double Length = 0.0;
-		for (int32 Index = 0; Index + 1 < Points.Num(); ++Index)
-		{
-			Length += FVector3d::Distance(Points[Index].Position, Points[Index + 1].Position);
-		}
-		return Length;
-	}
-
-	FVector3d SamplePolyline(
-		const TConstArrayView<CableSim::FTautPoint> Points,
-		const double NormalizedCoordinate)
-	{
-		if (Points.IsEmpty())
-		{
-			return FVector3d::ZeroVector;
-		}
-		const double Length = CalculatePolylineLength(Points);
-		if (Length <= 1.e-9)
-		{
-			return Points[0].Position;
-		}
-		const double TargetDistance = FMath::Clamp(NormalizedCoordinate, 0.0, 1.0) * Length;
-		double AccumulatedDistance = 0.0;
-		for (int32 Index = 0; Index + 1 < Points.Num(); ++Index)
-		{
-			const double SegmentLength = FVector3d::Distance(Points[Index].Position, Points[Index + 1].Position);
-			if (AccumulatedDistance + SegmentLength >= TargetDistance && SegmentLength > 1.e-9)
-			{
-				return FMath::Lerp(
-					Points[Index].Position,
-					Points[Index + 1].Position,
-					(TargetDistance - AccumulatedDistance) / SegmentLength);
-			}
-			AccumulatedDistance += SegmentLength;
-		}
-		return Points.Last().Position;
-	}
-
-	uint32 GetCollisionSignature(const FCableSimCollisionSettings& Settings)
-	{
-		uint32 Hash = GetTypeHash(Settings.bEnableWorldCollision);
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.Radius));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.SkinWidth));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.MaximumContactsPerParticle));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactReleaseDistance));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactNormalToleranceDegrees));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactPersistenceSteps));
-		return HashCombineFast(Hash, GetTypeHash(static_cast<uint8>(Settings.Channel.GetValue())));
+		CableSim::FSimulationConfig Config;
+		Config.Length = FMath::Clamp(
+			Simulation.RestLength,
+			1.0,
+			EffectiveMaximumCableLength(Simulation));
+		Config.SegmentLength = FMath::Max(Simulation.NodeSpacing, 2.0);
+		Config.MaximumParticles = FMath::Clamp(Simulation.MaximumParticles, 2, 4096);
+		Config.LinearDensity = FMath::Max(Simulation.LinearDensity / 100.0, 1.e-9);
+		Config.Gravity = FVector3d(Simulation.Gravity);
+		Config.VelocityDamping = FMath::Clamp(Simulation.VelocityDamping, 0.0, 1.0);
+		Config.DistanceCompliance = FMath::Max(Simulation.DistanceCompliance, 0.0);
+		Config.DistanceRelaxation = FMath::Clamp(Simulation.DistanceRelaxation, 1.0, 1.1);
+		Config.BendStrength = FMath::Clamp(Simulation.BendStrength, 0.0, 1.0);
+		Config.FreeBendDegreesPerMeter = FMath::Max(Simulation.FreeBendDegreesPerMeter, 0.0);
+		Config.DrivenEndpointMaximumSpeed = FMath::Max(Simulation.DrivenEndpointMaximumSpeed, 1.0);
+		Config.SolverIterations = FMath::Clamp(Simulation.SolverIterations, 1, 256);
+		Config.MultigridIterations = FMath::Clamp(Simulation.MultigridIterations, 0, 8);
+		Config.MultigridMinimumParticles = FMath::Clamp(Simulation.MultigridMinimumParticles, 8, 4096);
+		Config.StaticFriction = Friction.bEnableFriction
+			? FMath::Max(Friction.StaticFrictionCoefficient, 0.0)
+			: 0.0;
+		Config.DynamicFriction = Friction.bEnableFriction
+			? FMath::Max(Friction.DynamicFrictionCoefficient, 0.0)
+			: 0.0;
+		Config.ConstantFrictionSpeedReduction = Friction.bEnableFriction
+			? FMath::Max(Friction.ConstantVelocityReduction, 0.0)
+			: 0.0;
+		Config.StaticFrictionDeadZone = Friction.bEnableFriction ? FMath::Max(Friction.StaticDeadZone, 0.0) : 0.0;
+		Config.FrictionFadeStartSpeed = FMath::Max(Friction.FadeStartSpeed, 0.0);
+		Config.FrictionFadeEndSpeed = FMath::Max(Friction.FadeEndSpeed, Config.FrictionFadeStartSpeed + 1.0);
+		Config.MaximumContactCorrection = FMath::Max(Collision.MaximumSafeCorrection, 0.1);
+		return Config;
 	}
 }
 
 struct FCableSimRuntimeState
 {
-	FCableSimEndpointResolver EndpointResolver;
-	FEndpointFrameSample EndpointSamples[2];
-	ECableSimEndpointBindingStatus EndpointStatuses[2] = {
-		ECableSimEndpointBindingStatus::Ready,
-		ECableSimEndpointBindingStatus::Ready};
-	ECableSimEndpointMode AppliedEndpointModes[2] = {
-		ECableSimEndpointMode::CableLocalKinematic,
-		ECableSimEndpointMode::CableLocalKinematic};
+	CableSim::FSolver Solver;
 	CableSim::FSimulationConfig AppliedConfig;
-	CableSim::FSimulationConfig PendingConfig;
-	CableSim::FTautPathSolver TautSolver;
-	CableSim::FTautConfig AppliedTautConfig;
-	FCableSimChaosObjectTracker ChaosObjectTracker;
-	FCableSimChaosSnapshot ChaosSnapshot;
-	FCableSimContactCache ContactCache;
-	TArray<CableSim::FCollisionEdge> SupportedTautEdges;
-	FCableSimTautDiagnostics TautDiagnostics;
-	FCableSimEndpointConstraint EndpointConstraints[2];
-	TArray<FVector3d> PreviousSolvedPositions;
-	TArray<FVector3d> CurrentSolvedPositions;
+	FCableSimChaosObjectTracker ObjectTracker;
+	FCableSimCollisionSnapshot CollisionSnapshot;
+	FCableSimStatus Status;
+	FCableSimEndpointResult EndpointResults[2];
+	FVector3d LastFrameTargets[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
+	FVector3d CurrentFrameTargets[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
+	FVector3d ManualVelocities[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
+	bool bHasManualVelocity[2] = {false, false};
+	FVector3d LastValidEndpointTargets[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
+	bool bEndpointBindingValid[2] = {true, true};
+	double TargetLength = 400.0;
+	double LastObservedRestLength = 400.0;
+	ECableSimLengthChangeOrigin LengthOrigin = ECableSimLengthChangeOrigin::End;
+	bool bLengthClamped = false;
+	TArray<FVector3d> PreviousPositions;
+	TArray<FVector3d> CurrentPositions;
+	TArray<CableSim::FContactConstraint> DebugContacts;
+	TArray<FVector3d> DebugContactPoints;
+	TArray<FVector3d> DebugRejectedPoints;
 	double AccumulatedTime = 0.0;
-	double EndpointSampleElapsedTime = 0.0;
-	double DroppedSimulationTime = 0.0;
-	double RenderInterpolationAlpha = 1.0;
-	FVector3d EditorPreviewEndpoints[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
-	bool bHasEditorPreview = false;
-	FVector3d LastAcceptedReachablePositions[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
-	bool bHasAcceptedReachablePosition[2] = {false, false};
-	bool bConfigPending = false;
-	bool bTautWasEnabled = false;
-	uint32 AppliedCollisionSignature = 0;
+	double RenderAlpha = 1.0;
+	bool bLegacyMigrated = false;
+	bool bInitialized = false;
 };
 
 UCableSimComponent::UCableSimComponent()
@@ -201,6 +293,7 @@ UCableSimComponent::UCableSimComponent()
 	bTickInEditor = true;
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 	SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	StartEndpoint.SpawnLocalPosition = FVector(-150.0, 0.0, 0.0);
 	StartEndpoint.LocalTarget = StartEndpoint.SpawnLocalPosition;
@@ -208,14 +301,24 @@ UCableSimComponent::UCableSimComponent()
 	EndEndpoint.LocalTarget = EndEndpoint.SpawnLocalPosition;
 }
 
-void UCableSimComponent::OnRegister()
+void UCableSimComponent::PostLoad()
 {
-	Super::OnRegister();
-	if (const UWorld* World = GetWorld(); World && !World->IsGameWorld())
+	Super::PostLoad();
+	const int32 ObjectVersion = GetLinkerCustomVersion(CableSimObjectVersionGuid);
+	if (ObjectVersion < static_cast<int32>(ECableSimObjectVersion::LinearDensity)
+		|| MaterialSettingsVersion < 1)
 	{
-		RefreshEditorPreview();
-		RefreshVisualization();
+		SimulationSettings.LinearDensity = FMath::Max(
+			SimulationSettings.ParticleMass * 100.0 / FMath::Max(SimulationSettings.NodeSpacing, 1.0),
+			1.e-6);
+		MaterialSettingsVersion = 1;
 	}
+}
+
+void UCableSimComponent::Serialize(FArchive& Ar)
+{
+	Ar.UsingCustomVersion(CableSimObjectVersionGuid);
+	Super::Serialize(Ar);
 }
 
 UCableSimComponent::~UCableSimComponent()
@@ -224,936 +327,780 @@ UCableSimComponent::~UCableSimComponent()
 	RuntimeState = nullptr;
 }
 
+void UCableSimComponent::OnRegister()
+{
+	Super::OnRegister();
+	MigrateLegacyBindings();
+	if (const UWorld* World = GetWorld(); World && !World->IsGameWorld())
+	{
+		RefreshEditorPreview();
+		RefreshVisualization();
+	}
+}
+
 void UCableSimComponent::BeginPlay()
 {
 	Super::BeginPlay();
 	ReinitializeSimulation();
-	RefreshVisualization();
 }
 
 void UCableSimComponent::TickComponent(
 	const float DeltaTime,
 	const ELevelTick TickType,
-	FActorComponentTickFunction* ThisTickFunction)
+	FActorComponentTickFunction* TickFunction)
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	if (const UWorld* World = GetWorld(); World && !World->IsGameWorld())
+	Super::TickComponent(DeltaTime, TickType, TickFunction);
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
 	{
 		RefreshEditorPreview();
 		RefreshVisualization();
 		return;
 	}
-	SynchronizeConfiguration();
-	SynchronizeEndpointModes();
-
-	if (SimulationSettings.bSimulationEnabled && Solver.IsInitialized())
+	if (!RuntimeState->bInitialized)
 	{
-		SampleEndpointTargets(DeltaTime);
-		const double SafeFixedStep = FMath::Max(SimulationSettings.FixedTimeStep, 1.e-4);
-		const int32 SafeMaximumSubsteps = FMath::Clamp(SimulationSettings.MaximumSubsteps, 1, 16);
-		const double RawDeltaTime = FMath::Max(static_cast<double>(DeltaTime), 0.0);
-		const double AcceptedDeltaTime = FMath::Min(RawDeltaTime, SafeFixedStep * SafeMaximumSubsteps);
-		RuntimeState->DroppedSimulationTime += RawDeltaTime - AcceptedDeltaTime;
-		RuntimeState->AccumulatedTime += AcceptedDeltaTime;
-
-		const int32 StepsToPerform = FMath::Min(
-			FMath::FloorToInt(RuntimeState->AccumulatedTime / SafeFixedStep),
-			SafeMaximumSubsteps);
-		for (int32 Step = 0; Step < StepsToPerform; ++Step)
-		{
-			PerformFixedStep(static_cast<double>(Step + 1) / static_cast<double>(StepsToPerform));
-			RuntimeState->AccumulatedTime -= SafeFixedStep;
-		}
-		if (StepsToPerform > 0)
-		{
-			CommitEndpointSamples();
-		}
-		RuntimeState->RenderInterpolationAlpha = FMath::Clamp(
-			RuntimeState->AccumulatedTime / SafeFixedStep,
-			0.0,
-			1.0);
+		ReinitializeSimulation();
 	}
-	else
+	if (!FMath::IsNearlyEqual(SimulationSettings.RestLength, RuntimeState->LastObservedRestLength))
 	{
-		RuntimeState->RenderInterpolationAlpha = 1.0;
+		SetTargetCableLength(SimulationSettings.RestLength, SimulationSettings.LengthChangeOrigin);
+		RuntimeState->LastObservedRestLength = SimulationSettings.RestLength;
+	}
+	CableSim::FSimulationConfig CurrentConfig = BuildCoreConfig(SimulationSettings, FrictionSettings, CollisionSettings);
+	CurrentConfig.Length = RuntimeState->Solver.GetActiveLength();
+	if (!CurrentConfig.Equals(RuntimeState->AppliedConfig))
+	{
+		if (RuntimeState->Solver.ApplyConfig(CurrentConfig))
+		{
+			RuntimeState->AppliedConfig = RuntimeState->Solver.GetConfig();
+			RuntimeState->CollisionSnapshot.Reset();
+			if (RuntimeState->CurrentPositions.Num() != RuntimeState->Solver.GetParticles().Num())
+			{
+				RuntimeState->PreviousPositions.Reset();
+				RuntimeState->CurrentPositions.Reset();
+				for (const CableSim::FParticle& Particle : RuntimeState->Solver.GetParticles())
+				{
+					RuntimeState->PreviousPositions.Add(Particle.Position);
+					RuntimeState->CurrentPositions.Add(Particle.Position);
+				}
+			}
+		}
+		else
+		{
+			RuntimeState->Status.Status = ECableSimSimulationStatus::InvalidConfiguration;
+		}
 	}
 
+	ResolveEndpointTarget(StartEndpoint, 0, RuntimeState->CurrentFrameTargets[0]);
+	ResolveEndpointTarget(EndEndpoint, 1, RuntimeState->CurrentFrameTargets[1]);
+
+	if (SimulationSettings.bSimulationEnabled)
+	{
+		const double FixedStep = FMath::Max(SimulationSettings.FixedTimeStep, 0.001);
+		const int32 MaximumSteps = FMath::Clamp(SimulationSettings.MaximumSubsteps, 1, 8);
+		RuntimeState->AccumulatedTime += FMath::Min(
+			FMath::Max(static_cast<double>(DeltaTime), 0.0),
+			FixedStep * MaximumSteps);
+		const int32 StepCount = FMath::Min(
+			FMath::FloorToInt(RuntimeState->AccumulatedTime / FixedStep),
+			MaximumSteps);
+		for (int32 Step = 0; Step < StepCount; ++Step)
+		{
+			PerformFixedStep(static_cast<double>(Step + 1) / static_cast<double>(StepCount));
+			RuntimeState->AccumulatedTime -= FixedStep;
+		}
+		if (StepCount > 0)
+		{
+			RuntimeState->LastFrameTargets[0] = RuntimeState->CurrentFrameTargets[0];
+			RuntimeState->LastFrameTargets[1] = RuntimeState->CurrentFrameTargets[1];
+		}
+		RuntimeState->RenderAlpha = FMath::Clamp(RuntimeState->AccumulatedTime / FixedStep, 0.0, 1.0);
+	}
 	RefreshVisualization();
 }
 
 void UCableSimComponent::ReinitializeSimulation()
 {
+	MigrateLegacyBindings();
 	RuntimeState->AccumulatedTime = 0.0;
-	RuntimeState->EndpointSampleElapsedTime = 0.0;
-	RuntimeState->DroppedSimulationTime = 0.0;
-	RuntimeState->RenderInterpolationAlpha = 1.0;
-	RuntimeState->EndpointResolver.Reset();
-	RuntimeState->TautSolver.Reset();
-	RuntimeState->ChaosObjectTracker.Reset();
-	RuntimeState->ChaosSnapshot.Reset();
-	RuntimeState->ContactCache.Reset();
-	RuntimeState->SupportedTautEdges.Reset();
-	RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
-	RuntimeState->bTautWasEnabled = TautSettings.bEnableTautSolver;
-	RuntimeState->AppliedCollisionSignature = GetCollisionSignature(CollisionSettings);
+	RuntimeState->RenderAlpha = 1.0;
+	RuntimeState->ObjectTracker.Reset();
+	RuntimeState->CollisionSnapshot.Reset();
+	RuntimeState->Status = FCableSimStatus{};
+	RuntimeState->DebugContacts.Reset();
+	RuntimeState->DebugContactPoints.Reset();
+	RuntimeState->bEndpointBindingValid[0] = true;
+	RuntimeState->bEndpointBindingValid[1] = true;
 
-	const FVector3d StartPosition = ResolveInitialPosition(StartEndpoint, ECableSimEndpoint::Start);
-	const FVector3d EndPosition = ResolveInitialPosition(EndEndpoint, ECableSimEndpoint::End);
-	RuntimeState->AppliedConfig = BuildCoreConfig();
-	RuntimeState->PendingConfig = RuntimeState->AppliedConfig;
-	RuntimeState->bConfigPending = false;
-	Solver.Initialize(StartPosition, EndPosition, RuntimeState->AppliedConfig);
-	RuntimeState->PreviousSolvedPositions.Reset();
-	RuntimeState->CurrentSolvedPositions.Reset();
-	for (const CableSim::FParticle& Particle : Solver.GetParticles())
+	auto InitialPosition = [this](const FCableSimEndpointBinding& Endpoint, const int32 EndpointIndex)
 	{
-		RuntimeState->PreviousSolvedPositions.Add(Particle.Position);
-		RuntimeState->CurrentSolvedPositions.Add(Particle.Position);
-	}
-	for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
-	{
-		FCableSimEndpointConstraint& Constraint = RuntimeState->EndpointConstraints[EndpointIndex];
-		Constraint = FCableSimEndpointConstraint{};
-		Constraint.Endpoint = EndpointIndex == 0 ? ECableSimEndpoint::Start : ECableSimEndpoint::End;
-		Constraint.Status = TautSettings.bEnableTautSolver
-			? ECableSimEndpointConstraintStatus::UnsupportedEndpointConfiguration
-			: ECableSimEndpointConstraintStatus::Disabled;
-	}
-	StartEndpointConstraint = RuntimeState->EndpointConstraints[0];
-	EndEndpointConstraint = RuntimeState->EndpointConstraints[1];
-	if (TautSettings.bEnableTautSolver)
-	{
-		RuntimeState->AppliedTautConfig.TopologyTolerance = FMath::Max(TautSettings.TopologyTolerance, 0.001);
-		RuntimeState->AppliedTautConfig.MaximumCollisionPasses = FMath::Clamp(TautSettings.MaximumCollisionPasses, 2, 64);
-		RuntimeState->TautSolver.Initialize(StartPosition, EndPosition, RuntimeState->AppliedTautConfig);
-		RuntimeState->TautDiagnostics.Status = ECableSimTautStatus::Uninitialized;
-	}
+		if (Endpoint.State == ECableSimEndpointState::Free)
+		{
+			return FVector3d(GetComponentTransform().TransformPosition(Endpoint.SpawnLocalPosition));
+		}
+		switch (Endpoint.TargetSpace)
+		{
+		case ECableSimTargetSpace::World:
+			return FVector3d(Endpoint.WorldTarget);
+		case ECableSimTargetSpace::Component:
+			if (IsValid(Endpoint.TargetComponent))
+			{
+				const FTransform Transform = Endpoint.SocketName.IsNone()
+					? Endpoint.TargetComponent->GetComponentTransform()
+					: Endpoint.TargetComponent->GetSocketTransform(Endpoint.SocketName);
+				RuntimeState->bEndpointBindingValid[EndpointIndex] = true;
+				return FVector3d(Transform.TransformPosition(Endpoint.ComponentLocalOffset));
+			}
+			RuntimeState->bEndpointBindingValid[EndpointIndex] = false;
+			return FVector3d(GetComponentTransform().TransformPosition(Endpoint.SpawnLocalPosition));
+		default:
+			return FVector3d(GetComponentTransform().TransformPosition(Endpoint.LocalTarget));
+		}
+	};
 
-	const ECableSimEndpoint Endpoints[] = {ECableSimEndpoint::Start, ECableSimEndpoint::End};
-	for (const ECableSimEndpoint Endpoint : Endpoints)
+	const FVector3d Start = InitialPosition(StartEndpoint, 0);
+	const FVector3d End = InitialPosition(EndEndpoint, 1);
+	RuntimeState->AppliedConfig = BuildCoreConfig(SimulationSettings, FrictionSettings, CollisionSettings);
+	RuntimeState->bInitialized = RuntimeState->Solver.Initialize(Start, End, RuntimeState->AppliedConfig);
+	RuntimeState->TargetLength = RuntimeState->AppliedConfig.Length;
+	RuntimeState->LastObservedRestLength = SimulationSettings.RestLength;
+	RuntimeState->LengthOrigin = SimulationSettings.LengthChangeOrigin;
+	RuntimeState->bLengthClamped = !FMath::IsNearlyEqual(RuntimeState->TargetLength, SimulationSettings.RestLength);
+	RuntimeState->LastValidEndpointTargets[0] = Start;
+	RuntimeState->LastValidEndpointTargets[1] = End;
+	RuntimeState->LastFrameTargets[0] = Start;
+	RuntimeState->LastFrameTargets[1] = End;
+	RuntimeState->CurrentFrameTargets[0] = Start;
+	RuntimeState->CurrentFrameTargets[1] = End;
+	RuntimeState->PreviousPositions.Reset();
+	RuntimeState->CurrentPositions.Reset();
+	for (const CableSim::FParticle& Particle : RuntimeState->Solver.GetParticles())
 	{
-		const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
-		FVector3d Position;
-		ECableSimEndpointBindingStatus EndpointStatus;
-		TryResolveTargetPosition(Endpoint, Position, EndpointStatus);
-		RuntimeState->EndpointStatuses[Index] = EndpointStatus;
-		RuntimeState->EndpointSamples[Index].ConsumedPosition = Position;
-		RuntimeState->EndpointSamples[Index].CurrentPosition = Position;
-		RuntimeState->EndpointSamples[Index].Velocity = FVector3d::ZeroVector;
-		RuntimeState->AppliedEndpointModes[Index] = GetBinding(Endpoint).Mode;
-		RuntimeState->LastAcceptedReachablePositions[Index] = Position;
-		RuntimeState->bHasAcceptedReachablePosition[Index] = true;
+		RuntimeState->PreviousPositions.Add(Particle.Position);
+		RuntimeState->CurrentPositions.Add(Particle.Position);
 	}
+	RuntimeState->Status.Status = RuntimeState->bInitialized
+		? ECableSimSimulationStatus::Ready
+		: ECableSimSimulationStatus::InvalidConfiguration;
+	RuntimeState->Status.ParticleCount = RuntimeState->Solver.GetParticles().Num();
+	RuntimeState->Status.ActiveLength = RuntimeState->Solver.GetActiveLength();
+	RuntimeState->Status.TargetLength = RuntimeState->TargetLength;
+	RuntimeState->Status.MaximumLength = EffectiveMaximumCableLength(SimulationSettings);
+	RuntimeState->Status.LengthChangeOrigin = RuntimeState->LengthOrigin;
+	RuntimeState->Status.bLengthClamped = RuntimeState->bLengthClamped;
+	RuntimeState->Status.bBindingFailure = !RuntimeState->bEndpointBindingValid[0]
+		|| !RuntimeState->bEndpointBindingValid[1];
+	RefreshVisualization();
 }
 
 void UCableSimComponent::StepSimulation(const int32 StepCount)
 {
-	const int32 SafeStepCount = FMath::Clamp(StepCount, 0, 10000);
-	if (SafeStepCount == 0)
-	{
-		return;
-	}
-	if (!Solver.IsInitialized())
+	if (!RuntimeState->bInitialized)
 	{
 		ReinitializeSimulation();
 	}
-	SynchronizeConfiguration();
-	SynchronizeEndpointModes();
-	SampleEndpointTargets(FMath::Max(SimulationSettings.FixedTimeStep, 1.e-4));
-	for (int32 Step = 0; Step < SafeStepCount; ++Step)
+	for (int32 Step = 0; Step < FMath::Clamp(StepCount, 0, 1000); ++Step)
 	{
 		PerformFixedStep(1.0);
 	}
-	CommitEndpointSamples();
+	RuntimeState->RenderAlpha = 1.0;
+	RefreshVisualization();
 }
 
-void UCableSimComponent::SetRestLength(const double NewRestLength)
-{
-	SimulationSettings.RestLength = FMath::Max(NewRestLength, 0.01);
-	SynchronizeConfiguration();
-}
-
-void UCableSimComponent::SetEndpointMode(
+void UCableSimComponent::SetEndpointState(
 	const ECableSimEndpoint Endpoint,
-	const ECableSimEndpointMode Mode)
+	const ECableSimEndpointState State)
 {
-	const int32 EndpointIndex = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
-	FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	if (Solver.IsInitialized() && Mode != ECableSimEndpointMode::Simulated)
-	{
-		const int32 ParticleIndex = Endpoint == ECableSimEndpoint::Start ? 0 : Solver.GetParticles().Num() - 1;
-		const FVector WorldPosition(Solver.GetParticles()[ParticleIndex].Position);
-		if (Mode == ECableSimEndpointMode::CableLocalKinematic)
-		{
-			Binding.LocalTarget = GetComponentTransform().InverseTransformPosition(WorldPosition);
-		}
-		else if (Mode == ECableSimEndpointMode::WorldKinematic)
-		{
-			Binding.WorldTarget = WorldPosition;
-		}
-	}
-	Binding.Mode = Mode;
-	RuntimeState->AppliedEndpointModes[EndpointIndex] = Mode;
-	RuntimeState->ContactCache.Reset();
+	Binding(Endpoint).State = State;
+	const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
+	RuntimeState->bHasManualVelocity[Index] = false;
+	RuntimeState->CollisionSnapshot.Reset();
 }
 
-void UCableSimComponent::SetEndpointWorldTarget(
+void UCableSimComponent::SetDrivenEndpointTarget(
 	const ECableSimEndpoint Endpoint,
-	const FVector WorldPosition)
+	const FVector WorldPosition,
+	const FVector WorldVelocity)
 {
-	FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	Binding.Mode = ECableSimEndpointMode::WorldKinematic;
-	Binding.WorldTarget = WorldPosition;
-	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
-}
-
-void UCableSimComponent::SetEndpointLocalTarget(
-	const ECableSimEndpoint Endpoint,
-	const FVector LocalPosition)
-{
-	FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	Binding.Mode = ECableSimEndpointMode::CableLocalKinematic;
-	Binding.LocalTarget = LocalPosition;
-	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
+	FCableSimEndpointBinding& EndpointBinding = Binding(Endpoint);
+	EndpointBinding.State = ECableSimEndpointState::Driven;
+	EndpointBinding.TargetSpace = ECableSimTargetSpace::World;
+	EndpointBinding.WorldTarget = WorldPosition;
+	const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
+	RuntimeState->LastValidEndpointTargets[Index] = FVector3d(WorldPosition);
+	RuntimeState->bEndpointBindingValid[Index] = true;
+	RuntimeState->ManualVelocities[Index] = FVector3d(WorldVelocity);
+	RuntimeState->bHasManualVelocity[Index] = true;
 }
 
 void UCableSimComponent::AttachEndpointToComponent(
 	const ECableSimEndpoint Endpoint,
-	USceneComponent* TargetComponent,
+	USceneComponent* Component,
 	const FName SocketName,
 	const FVector LocalOffset)
 {
-	FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	Binding.Mode = ECableSimEndpointMode::ComponentKinematic;
-	Binding.TargetComponent = TargetComponent;
-	Binding.SocketName = SocketName;
-	Binding.ComponentLocalOffset = LocalOffset;
-	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
-	RuntimeState->ContactCache.Reset();
+	FCableSimEndpointBinding& EndpointBinding = Binding(Endpoint);
+	EndpointBinding.State = ECableSimEndpointState::Fixed;
+	EndpointBinding.TargetSpace = ECableSimTargetSpace::Component;
+	EndpointBinding.TargetComponent = Component;
+	EndpointBinding.SocketName = SocketName;
+	EndpointBinding.ComponentLocalOffset = LocalOffset;
+	const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
+	RuntimeState->bHasManualVelocity[Index] = false;
+	RuntimeState->CollisionSnapshot.Reset();
+}
+
+void UCableSimComponent::DriveEndpointFromComponent(
+	const ECableSimEndpoint Endpoint,
+	USceneComponent* Component,
+	const FName SocketName,
+	const FVector LocalOffset)
+{
+	FCableSimEndpointBinding& EndpointBinding = Binding(Endpoint);
+	EndpointBinding.State = ECableSimEndpointState::Driven;
+	EndpointBinding.TargetSpace = ECableSimTargetSpace::Component;
+	EndpointBinding.TargetComponent = Component;
+	EndpointBinding.SocketName = SocketName;
+	EndpointBinding.ComponentLocalOffset = LocalOffset;
+	const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
+	RuntimeState->bHasManualVelocity[Index] = false;
+	RuntimeState->CollisionSnapshot.Reset();
 }
 
 void UCableSimComponent::ReleaseEndpoint(
 	const ECableSimEndpoint Endpoint,
 	const bool bPreserveVelocity)
 {
-	if (Solver.IsInitialized() && !bPreserveVelocity)
+	Binding(Endpoint).State = ECableSimEndpointState::Free;
+	const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
+	RuntimeState->bHasManualVelocity[Index] = false;
+	if (!bPreserveVelocity && RuntimeState->Solver.IsInitialized())
 	{
-		CableSim::FStateSnapshot Snapshot = Solver.CaptureState();
-		const int32 ParticleIndex = Endpoint == ECableSimEndpoint::Start ? 0 : Snapshot.Particles.Num() - 1;
-		Snapshot.Particles[ParticleIndex].Velocity = FVector3d::ZeroVector;
-		Snapshot.Particles[ParticleIndex].PreviousPosition = Snapshot.Particles[ParticleIndex].Position;
-		Solver.RestoreState(Snapshot);
+		CableSim::FStateSnapshot Snapshot = RuntimeState->Solver.CaptureState();
+		Snapshot.Particles[Endpoint == ECableSimEndpoint::Start ? 0 : Snapshot.Particles.Num() - 1].Velocity
+			= FVector3d::ZeroVector;
+		RuntimeState->Solver.RestoreState(Snapshot);
 	}
-	SetEndpointMode(Endpoint, ECableSimEndpointMode::Simulated);
+	RuntimeState->CollisionSnapshot.Reset();
 }
 
-void UCableSimComponent::TeleportEndpoint(
-	const ECableSimEndpoint Endpoint,
-	const FVector WorldPosition,
-	const bool bResetVelocity)
+FCableSimEndpointResult UCableSimComponent::GetEndpointResult(const ECableSimEndpoint Endpoint) const
 {
-	if (!Solver.IsInitialized())
-	{
-		ReinitializeSimulation();
-	}
-	CableSim::FStateSnapshot Snapshot = Solver.CaptureState();
-	const int32 ParticleIndex = Endpoint == ECableSimEndpoint::Start ? 0 : Snapshot.Particles.Num() - 1;
-	CableSim::FParticle& Particle = Snapshot.Particles[ParticleIndex];
-	Particle.Position = FVector3d(WorldPosition);
-	Particle.PreviousPosition = Particle.Position;
-	Particle.KinematicTarget = Particle.Position;
-	if (bResetVelocity)
-	{
-		Particle.Velocity = FVector3d::ZeroVector;
-	}
-	Solver.RestoreState(Snapshot);
-	FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	if (Binding.Mode != ECableSimEndpointMode::Simulated)
-	{
-		Binding.Mode = ECableSimEndpointMode::WorldKinematic;
-		Binding.WorldTarget = WorldPosition;
-	}
-	RuntimeState->EndpointResolver.Reset();
-	RuntimeState->ContactCache.Reset();
-	RuntimeState->TautSolver.Reset();
-	SampleEndpointTargets(0.0);
+	return RuntimeState->EndpointResults[Endpoint == ECableSimEndpoint::Start ? 0 : 1];
 }
 
-void UCableSimComponent::ResetSimulation()
+TArray<FVector> UCableSimComponent::GetCablePolyline() const
 {
-	ReinitializeSimulation();
-}
-
-TArray<FVector> UCableSimComponent::GetSimulationPolyline() const
-{
-	TArray<FVector> Positions;
-	Positions.Reserve(Solver.GetParticles().Num());
-	for (const CableSim::FParticle& Particle : Solver.GetParticles())
+	TArray<FVector> Result;
+	const int32 Count = RuntimeState->CurrentPositions.Num();
+	Result.Reserve(Count);
+	for (int32 Index = 0; Index < Count; ++Index)
 	{
-		Positions.Add(FVector(Particle.Position));
+		const FVector3d Previous = RuntimeState->PreviousPositions.IsValidIndex(Index)
+			? RuntimeState->PreviousPositions[Index]
+			: RuntimeState->CurrentPositions[Index];
+		Result.Add(FVector(FMath::Lerp(Previous, RuntimeState->CurrentPositions[Index], RuntimeState->RenderAlpha)));
 	}
-	return Positions;
-}
-
-TArray<FVector> UCableSimComponent::GetRenderPolyline() const
-{
-	if (RuntimeState->PreviousSolvedPositions.Num() != RuntimeState->CurrentSolvedPositions.Num()
-		|| RuntimeState->CurrentSolvedPositions.IsEmpty())
-	{
-		return GetSimulationPolyline();
-	}
-	TArray<FVector> Positions;
-	Positions.Reserve(RuntimeState->CurrentSolvedPositions.Num());
-	for (int32 Index = 0; Index < RuntimeState->CurrentSolvedPositions.Num(); ++Index)
-	{
-		Positions.Add(FVector(FMath::Lerp(
-			RuntimeState->PreviousSolvedPositions[Index],
-			RuntimeState->CurrentSolvedPositions[Index],
-			RuntimeState->RenderInterpolationAlpha)));
-	}
-	return Positions;
+	return Result;
 }
 
 FCableSimStatus UCableSimComponent::GetSimulationStatus() const
 {
-	const CableSim::FStepResult& Result = Solver.GetLastStepResult();
-	FCableSimStatus Status;
-	Status.Status = ToRuntimeStatus(Result.Status);
-	Status.StepIndex = static_cast<int64>(Result.StepIndex);
-	Status.ParticleCount = Result.ParticleCount;
-	Status.ContactCount = Result.ContactCount;
-	Status.PersistedContactCount = RuntimeState->ContactCache.Contacts.Num();
-	Status.ContactAdditionCount = RuntimeState->ContactCache.AdditionCount;
-	Status.ContactRemovalCount = RuntimeState->ContactCache.RemovalCount;
-	Status.GuideConstraintCount = Result.GuideConstraintCount;
-	Status.ProjectedContactCount = Result.ProjectedContactCount;
-	Status.StaticFrictionAnchorCount = Result.StaticFrictionAnchorCount;
-	Status.StartEndpointStatus = RuntimeState->EndpointStatuses[0];
-	Status.EndEndpointStatus = RuntimeState->EndpointStatuses[1];
-	Status.RestLength = Result.RestLength;
-	Status.EffectiveSolveLength = Result.EffectiveSolveLength;
-	Status.EndpointDistance = Result.EndpointDistance;
-	Status.StrainRatio = Result.StrainRatio;
-	Status.MaximumSegmentError = Result.MaximumSegmentError;
-	Status.MaximumPenetration = Result.MaximumPenetration;
-	Status.MaximumGuideError = Result.MaximumGuideError;
-	Status.MaximumParticleSpeed = Result.MaximumParticleSpeed;
-	Status.RmsParticleSpeed = Result.RmsParticleSpeed;
-	Status.MaximumEstimatedTension = Result.MaximumEstimatedTension;
-	Status.MaximumEstimatedNormalLoad = Result.MaximumEstimatedNormalLoad;
-	Status.DroppedSimulationTime = RuntimeState->DroppedSimulationTime;
-	return Status;
+	return RuntimeState->Status;
 }
 
-int64 UCableSimComponent::GetSimulationStepIndex() const
+double UCableSimComponent::SetTargetCableLength(
+	const double NewLength,
+	const ECableSimLengthChangeOrigin Origin)
 {
-	return static_cast<int64>(Solver.GetStepIndex());
+	const double Maximum = EffectiveMaximumCableLength(SimulationSettings);
+	RuntimeState->TargetLength = FMath::Clamp(NewLength, 1.0, Maximum);
+	RuntimeState->LengthOrigin = Origin;
+	RuntimeState->bLengthClamped = !FMath::IsNearlyEqual(NewLength, RuntimeState->TargetLength);
+	SimulationSettings.RestLength = RuntimeState->TargetLength;
+	RuntimeState->LastObservedRestLength = RuntimeState->TargetLength;
+	return RuntimeState->TargetLength;
 }
 
-TArray<FVector> UCableSimComponent::GetTautPolyline() const
+void UCableSimComponent::StopLengthChange()
 {
-	TArray<FVector> Positions;
-	Positions.Reserve(RuntimeState->TautSolver.GetPoints().Num());
-	for (const CableSim::FTautPoint& Point : RuntimeState->TautSolver.GetPoints())
+	RuntimeState->TargetLength = GetActiveCableLength();
+	SimulationSettings.RestLength = RuntimeState->TargetLength;
+	RuntimeState->LastObservedRestLength = RuntimeState->TargetLength;
+}
+
+double UCableSimComponent::GetActiveCableLength() const
+{
+	return RuntimeState && RuntimeState->Solver.IsInitialized()
+		? RuntimeState->Solver.GetActiveLength()
+		: 0.0;
+}
+
+double UCableSimComponent::GetTargetCableLength() const
+{
+	return RuntimeState ? RuntimeState->TargetLength : 0.0;
+}
+
+bool UCableSimComponent::IsLengthChanging() const
+{
+	return RuntimeState && RuntimeState->Solver.IsInitialized()
+		&& !FMath::IsNearlyEqual(RuntimeState->TargetLength, RuntimeState->Solver.GetActiveLength(), 1.e-4);
+}
+
+bool UCableSimComponent::ResolveEndpointTarget(
+	const FCableSimEndpointBinding& Endpoint,
+	const int32 EndpointIndex,
+	FVector3d& OutTarget)
+{
+	if (Endpoint.State == ECableSimEndpointState::Free && RuntimeState->Solver.IsInitialized())
 	{
-		Positions.Add(FVector(Point.Position));
-	}
-	return Positions;
-}
-
-FCableSimTautDiagnostics UCableSimComponent::GetTautDiagnostics() const
-{
-	return RuntimeState->TautDiagnostics;
-}
-
-FCableSimEndpointConstraint UCableSimComponent::GetEndpointConstraint(
-	const ECableSimEndpoint Endpoint) const
-{
-	return Endpoint == ECableSimEndpoint::Start ? StartEndpointConstraint : EndEndpointConstraint;
-}
-
-FCableSimEndpointBinding& UCableSimComponent::GetBinding(const ECableSimEndpoint Endpoint)
-{
-	return Endpoint == ECableSimEndpoint::Start ? StartEndpoint : EndEndpoint;
-}
-
-const FCableSimEndpointBinding& UCableSimComponent::GetBinding(const ECableSimEndpoint Endpoint) const
-{
-	return Endpoint == ECableSimEndpoint::Start ? StartEndpoint : EndEndpoint;
-}
-
-CableSim::FSimulationConfig UCableSimComponent::BuildCoreConfig() const
-{
-	CableSim::FSimulationConfig Config;
-	Config.RestLength = FMath::Max(SimulationSettings.RestLength, 0.01);
-	Config.NodeSpacing = FMath::Max(SimulationSettings.NodeSpacing, 0.01);
-	Config.ParticleMass = FMath::Max(SimulationSettings.ParticleMass, 1.e-9);
-	Config.Gravity = FVector3d(SimulationSettings.Gravity);
-	Config.VelocityDamping = FMath::Clamp(SimulationSettings.VelocityDamping, 0.0, 1.0);
-	Config.DistanceOverRelaxation = FMath::Clamp(SimulationSettings.DistanceOverRelaxation, 1.0, 1.05);
-	Config.BendingStepStrength = FMath::Clamp(BendingSettings.StepStiffness, 0.0, 1.0);
-	Config.FreeBendAngleRadiansPerMeter = FMath::Max(
-		FMath::DegreesToRadians(BendingSettings.FreeAngleDegreesPerMeter),
-		0.0);
-	Config.ConstraintIterations = FMath::Clamp(SimulationSettings.ConstraintIterations, 0, 1024);
-	Config.bEnableFriction = FrictionSettings.bEnableFriction;
-	Config.StaticFrictionCoefficient = FMath::Max(FrictionSettings.StaticFrictionCoefficient, 0.0);
-	Config.DynamicFrictionCoefficient = FMath::Max(FrictionSettings.DynamicFrictionCoefficient, 0.0);
-	Config.StaticFrictionSpeedThreshold = FMath::Max(FrictionSettings.StaticSpeedThreshold, 0.0);
-	return Config;
-}
-
-FVector3d UCableSimComponent::ResolveInitialPosition(
-	const FCableSimEndpointBinding& Binding,
-	const ECableSimEndpoint Endpoint) const
-{
-	return FVector3d(GetComponentTransform().TransformPosition(Binding.SpawnLocalPosition));
-}
-
-FVector3d UCableSimComponent::ResolveTargetPosition(const ECableSimEndpoint Endpoint) const
-{
-	FVector3d Position;
-	ECableSimEndpointBindingStatus Status;
-	TryResolveTargetPosition(Endpoint, Position, Status);
-	return Position;
-}
-
-bool UCableSimComponent::TryResolveTargetPosition(
-	const ECableSimEndpoint Endpoint,
-	FVector3d& OutPosition,
-	ECableSimEndpointBindingStatus& OutStatus) const
-{
-	const FCableSimEndpointBinding& Binding = GetBinding(Endpoint);
-	if (Binding.Mode == ECableSimEndpointMode::Simulated)
-	{
-		OutStatus = ECableSimEndpointBindingStatus::Simulated;
-		if (Solver.IsInitialized())
-		{
-			const int32 ParticleIndex = Endpoint == ECableSimEndpoint::Start ? 0 : Solver.GetParticles().Num() - 1;
-			OutPosition = Solver.GetParticles()[ParticleIndex].Position;
-		}
-		else
-		{
-			OutPosition = FVector3d(GetComponentTransform().TransformPosition(Binding.SpawnLocalPosition));
-		}
+		const TArray<CableSim::FParticle>& Particles = RuntimeState->Solver.GetParticles();
+		OutTarget = EndpointIndex == 0 ? Particles[0].Position : Particles.Last().Position;
+		RuntimeState->LastValidEndpointTargets[EndpointIndex] = OutTarget;
+		RuntimeState->bEndpointBindingValid[EndpointIndex] = true;
 		return true;
 	}
-	return RuntimeState->EndpointResolver.Resolve(*this, Binding, Endpoint, OutPosition, OutStatus);
+	switch (Endpoint.TargetSpace)
+	{
+	case ECableSimTargetSpace::World:
+		OutTarget = FVector3d(Endpoint.WorldTarget);
+		break;
+	case ECableSimTargetSpace::Component:
+		if (!IsValid(Endpoint.TargetComponent))
+		{
+			OutTarget = RuntimeState->LastValidEndpointTargets[EndpointIndex];
+			RuntimeState->bEndpointBindingValid[EndpointIndex] = false;
+			return false;
+		}
+		{
+			const FTransform Transform = Endpoint.SocketName.IsNone()
+				? Endpoint.TargetComponent->GetComponentTransform()
+				: Endpoint.TargetComponent->GetSocketTransform(Endpoint.SocketName);
+			OutTarget = FVector3d(Transform.TransformPosition(Endpoint.ComponentLocalOffset));
+		}
+		break;
+	default:
+		OutTarget = FVector3d(GetComponentTransform().TransformPosition(Endpoint.LocalTarget));
+		break;
+	}
+	RuntimeState->LastValidEndpointTargets[EndpointIndex] = OutTarget;
+	RuntimeState->bEndpointBindingValid[EndpointIndex] = true;
+	return true;
 }
 
-void UCableSimComponent::SynchronizeConfiguration()
+FString UCableSimComponent::WriteDebugFrameDump() const
 {
-	if (!Solver.IsInitialized())
+	if (!RuntimeState || !RuntimeState->Solver.IsInitialized())
+	{
+		return FString();
+	}
+
+	const FString Directory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CableSimDumps"));
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	const FString Path = FPaths::Combine(
+		Directory,
+		FString::Printf(TEXT("CableFrame_%lld.txt"), RuntimeState->Status.StepIndex));
+
+	FString Text;
+	Text.Reserve(65536);
+	Text += FString::Printf(
+		TEXT("step=%lld status=%d particles=%d contacts=%d active_length=%.9g target_length=%.9g maximum_length=%.9g length_origin=%d length_changing=%d length_clamped=%d binding_failure=%d strain=%.9g penetration=%.9g correction=%.9g tension=%.9g normal_load=%.9g accepted=%.9g degraded=%d\n"),
+		RuntimeState->Status.StepIndex,
+		static_cast<int32>(RuntimeState->Status.Status),
+		RuntimeState->Status.ParticleCount,
+		RuntimeState->Status.ContactCount,
+		RuntimeState->Status.ActiveLength,
+		RuntimeState->Status.TargetLength,
+		RuntimeState->Status.MaximumLength,
+		static_cast<int32>(RuntimeState->Status.LengthChangeOrigin),
+		RuntimeState->Status.bLengthChanging ? 1 : 0,
+		RuntimeState->Status.bLengthClamped ? 1 : 0,
+		RuntimeState->Status.bBindingFailure ? 1 : 0,
+		RuntimeState->Status.MaximumSegmentStrain,
+		RuntimeState->Status.MaximumPenetration,
+		RuntimeState->Status.MaximumContactCorrection,
+		RuntimeState->Status.MaximumEstimatedTension,
+		RuntimeState->Status.MaximumEstimatedNormalLoad,
+		RuntimeState->Status.AcceptedMovementFraction,
+		RuntimeState->Status.bCollisionDegraded ? 1 : 0);
+
+	const TArray<CableSim::FParticle>& Particles = RuntimeState->Solver.GetParticles();
+	Text += TEXT("\n[particles]\n");
+	for (int32 Index = 0; Index < Particles.Num(); ++Index)
+	{
+		const CableSim::FParticle& Particle = Particles[Index];
+		Text += FString::Printf(
+			TEXT("%d p=(%.9g %.9g %.9g) prev=(%.9g %.9g %.9g) v=(%.9g %.9g %.9g) mass=%.9g inv_mass=%.9g material=%.9g tension=%.9g normal_load=%.9g\n"),
+			Index,
+			Particle.Position.X, Particle.Position.Y, Particle.Position.Z,
+			Particle.PreviousPosition.X, Particle.PreviousPosition.Y, Particle.PreviousPosition.Z,
+			Particle.Velocity.X, Particle.Velocity.Y, Particle.Velocity.Z,
+			Particle.Mass, Particle.InverseMass, Particle.MaterialCoordinate,
+			Particle.EstimatedTension, Particle.EstimatedNormalLoad);
+	}
+
+	Text += TEXT("\n[contacts]\n");
+	for (int32 Index = 0; Index < RuntimeState->DebugContacts.Num(); ++Index)
+	{
+		const CableSim::FContactConstraint& Contact = RuntimeState->DebugContacts[Index];
+		Text += FString::Printf(
+			TEXT("%d node=(%d %d %.9g) feature=(%llu %d %d %d %d) n=(%.9g %.9g %.9g) min=%.9g surface_v=(%.9g %.9g %.9g) normal_correction=%.9g particle_correction=(%.9g %.9g) friction_correction=%.9g largest_projection=%.9g\n"),
+			Index, Contact.ParticleA, Contact.ParticleB, Contact.SegmentAlpha,
+			Contact.FeatureId.ObjectToken, Contact.FeatureId.ShapeIndex,
+			static_cast<int32>(Contact.FeatureId.Type), Contact.FeatureId.Index0, Contact.FeatureId.Index1,
+			Contact.Normal.X, Contact.Normal.Y, Contact.Normal.Z, Contact.MinimumNormalCoordinate,
+			Contact.SurfaceVelocity.X, Contact.SurfaceVelocity.Y, Contact.SurfaceVelocity.Z,
+			Contact.AccumulatedNormalCorrection,
+			Contact.AccumulatedParticleCorrectionA,
+			Contact.AccumulatedParticleCorrectionB,
+			Contact.AccumulatedFrictionCorrection,
+			Contact.LargestProjection);
+	}
+
+	Text += TEXT("\n[collision_nodes]\n");
+	for (int32 NodeIndex = 0; NodeIndex < RuntimeState->CollisionSnapshot.Nodes.Num(); ++NodeIndex)
+	{
+		const FCableSimNodeCollisionGeometry& Node = RuntimeState->CollisionSnapshot.Nodes[NodeIndex];
+		Text += FString::Printf(
+			TEXT("node=%d bounds_min=(%.9g %.9g %.9g) bounds_max=(%.9g %.9g %.9g) triangles=%d edges=%d spheres=%d capsules=%d\n"),
+			NodeIndex,
+			Node.PredictedBounds.Min.X, Node.PredictedBounds.Min.Y, Node.PredictedBounds.Min.Z,
+			Node.PredictedBounds.Max.X, Node.PredictedBounds.Max.Y, Node.PredictedBounds.Max.Z,
+			Node.Triangles.Num(), Node.Edges.Num(), Node.Spheres.Num(), Node.Capsules.Num());
+		for (const CableSim::FCollisionTriangle& Triangle : Node.Triangles)
+		{
+			Text += FString::Printf(
+				TEXT("  tri feature=(%llu %d %d) a=(%.9g %.9g %.9g) b=(%.9g %.9g %.9g) c=(%.9g %.9g %.9g)\n"),
+				Triangle.Id.ObjectToken, Triangle.Id.ShapeIndex, Triangle.Id.Index0,
+				Triangle.Vertices[0].X, Triangle.Vertices[0].Y, Triangle.Vertices[0].Z,
+				Triangle.Vertices[1].X, Triangle.Vertices[1].Y, Triangle.Vertices[1].Z,
+				Triangle.Vertices[2].X, Triangle.Vertices[2].Y, Triangle.Vertices[2].Z);
+		}
+		for (const CableSim::FCollisionEdge& Edge : Node.Edges)
+		{
+			Text += FString::Printf(
+				TEXT("  edge feature=(%llu %d %d %d) kind=%d a=(%.9g %.9g %.9g) b=(%.9g %.9g %.9g)\n"),
+				Edge.Id.ObjectToken, Edge.Id.ShapeIndex, Edge.Id.Index0, Edge.Id.Index1,
+				static_cast<int32>(Edge.Kind),
+				Edge.Start.X, Edge.Start.Y, Edge.Start.Z, Edge.End.X, Edge.End.Y, Edge.End.Z);
+		}
+	}
+
+	return FFileHelper::SaveStringToFile(Text, *Path) ? Path : FString();
+}
+
+FCableSimEndpointBinding& UCableSimComponent::Binding(const ECableSimEndpoint Endpoint)
+{
+	return Endpoint == ECableSimEndpoint::Start ? StartEndpoint : EndEndpoint;
+}
+
+const FCableSimEndpointBinding& UCableSimComponent::Binding(const ECableSimEndpoint Endpoint) const
+{
+	return Endpoint == ECableSimEndpoint::Start ? StartEndpoint : EndEndpoint;
+}
+
+void UCableSimComponent::MigrateLegacyBindings()
+{
+	if (RuntimeState->bLegacyMigrated)
 	{
 		return;
 	}
-	const CableSim::FSimulationConfig CurrentConfig = BuildCoreConfig();
-	if (!CurrentConfig.Equals(RuntimeState->AppliedConfig))
+	for (FCableSimEndpointBinding* Endpoint : {&StartEndpoint, &EndEndpoint})
 	{
-		RuntimeState->PendingConfig = CurrentConfig;
-		RuntimeState->bConfigPending = true;
-		RuntimeState->ContactCache.Reset();
+		if (Endpoint->Mode == ECableSimEndpointMode::Simulated)
+		{
+			Endpoint->State = ECableSimEndpointState::Free;
+		}
+		if (Endpoint->Mode == ECableSimEndpointMode::WorldKinematic)
+		{
+			Endpoint->TargetSpace = ECableSimTargetSpace::World;
+		}
+		else if (Endpoint->Mode == ECableSimEndpointMode::ComponentKinematic)
+		{
+			Endpoint->TargetSpace = ECableSimTargetSpace::Component;
+		}
 	}
-	const uint32 CollisionSignature = GetCollisionSignature(CollisionSettings);
-	if (CollisionSignature != RuntimeState->AppliedCollisionSignature)
-	{
-		RuntimeState->AppliedCollisionSignature = CollisionSignature;
-		RuntimeState->ContactCache.Reset();
-	}
+	RuntimeState->bLegacyMigrated = true;
 }
 
-void UCableSimComponent::SynchronizeEndpointModes()
+void UCableSimComponent::PerformFixedStep(const double FrameAlpha)
 {
-	if (!Solver.IsInitialized())
+	if (!RuntimeState->Solver.IsInitialized())
 	{
 		return;
 	}
-	const ECableSimEndpoint Endpoints[] = {ECableSimEndpoint::Start, ECableSimEndpoint::End};
-	for (const ECableSimEndpoint Endpoint : Endpoints)
+	const double OuterDeltaTime = FMath::Max(SimulationSettings.FixedTimeStep, 0.001);
+	const double ActiveLength = RuntimeState->Solver.GetActiveLength();
+	const double LengthDelta = RuntimeState->TargetLength - ActiveLength;
+	if (FMath::Abs(LengthDelta) > 1.e-4)
 	{
-		const int32 EndpointIndex = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
-		const ECableSimEndpointMode Mode = GetBinding(Endpoint).Mode;
-		if (Mode != RuntimeState->AppliedEndpointModes[EndpointIndex])
+		const double Rate = LengthDelta > 0.0
+			? FMath::Max(SimulationSettings.PayoutSpeed, 0.0)
+			: FMath::Max(SimulationSettings.ReelSpeed, 0.0);
+		const double AppliedDelta = FMath::Clamp(LengthDelta, -Rate * OuterDeltaTime, Rate * OuterDeltaTime);
+		if (FMath::Abs(AppliedDelta) > 1.e-6)
 		{
-			RuntimeState->AppliedEndpointModes[EndpointIndex] = Mode;
-			RuntimeState->ContactCache.Reset();
-			RuntimeState->EndpointResolver.Reset();
+			const bool bChanged = RuntimeState->Solver.SetActiveLength(
+				ActiveLength + AppliedDelta,
+				ToCoreLengthOrigin(RuntimeState->LengthOrigin));
+			RuntimeState->bLengthClamped |= !bChanged;
+			RuntimeState->AppliedConfig = RuntimeState->Solver.GetConfig();
 		}
 	}
-}
-
-void UCableSimComponent::SampleEndpointTargets(const double DeltaTime)
-{
-	RuntimeState->EndpointSampleElapsedTime += FMath::Max(DeltaTime, 0.0);
-	const double SampleTime = FMath::Max(RuntimeState->EndpointSampleElapsedTime, 1.e-6);
-	const ECableSimEndpoint Endpoints[] = {ECableSimEndpoint::Start, ECableSimEndpoint::End};
-	for (const ECableSimEndpoint Endpoint : Endpoints)
-	{
-		const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
-		FEndpointFrameSample& Sample = RuntimeState->EndpointSamples[Index];
-		ECableSimEndpointBindingStatus EndpointStatus;
-		TryResolveTargetPosition(Endpoint, Sample.CurrentPosition, EndpointStatus);
-		RuntimeState->EndpointStatuses[Index] = EndpointStatus;
-		Sample.Velocity = (Sample.CurrentPosition - Sample.ConsumedPosition) / SampleTime;
-	}
-}
-
-CableSim::FStepInput UCableSimComponent::BuildStepInput(const double InterpolationAlpha) const
-{
-	CableSim::FStepInput Input;
-	Input.DeltaTime = FMath::Max(SimulationSettings.FixedTimeStep, 1.e-4);
-	const ECableSimEndpoint Endpoints[] = {ECableSimEndpoint::Start, ECableSimEndpoint::End};
-	for (const ECableSimEndpoint Endpoint : Endpoints)
-	{
-		const int32 Index = Endpoint == ECableSimEndpoint::Start ? 0 : 1;
-		const FEndpointFrameSample& Sample = RuntimeState->EndpointSamples[Index];
-		CableSim::FEndpointStepInput& EndpointInput = Endpoint == ECableSimEndpoint::Start
-			? Input.StartEndpoint
-			: Input.EndEndpoint;
-		EndpointInput.Mode = ToCoreMode(GetBinding(Endpoint).Mode);
-		EndpointInput.TargetPosition = FMath::Lerp(
-			Sample.ConsumedPosition,
-			Sample.CurrentPosition,
-			FMath::Clamp(InterpolationAlpha, 0.0, 1.0));
-		EndpointInput.TargetVelocity = EndpointInput.Mode == CableSim::EParticleMode::Kinematic
-			? Sample.Velocity
-			: FVector3d::ZeroVector;
-	}
-	return Input;
-}
-
-void UCableSimComponent::CommitEndpointSamples()
-{
-	for (FEndpointFrameSample& Sample : RuntimeState->EndpointSamples)
-	{
-		Sample.ConsumedPosition = Sample.CurrentPosition;
-	}
-	RuntimeState->EndpointSampleElapsedTime = 0.0;
-}
-
-void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
-{
-	if (RuntimeState->bConfigPending)
-	{
-		if (Solver.ApplyConfig(RuntimeState->PendingConfig))
-		{
-			RuntimeState->AppliedConfig = Solver.GetConfig();
-		}
-		RuntimeState->bConfigPending = false;
-	}
-
-	TArray<AActor*> IgnoredActors;
-	if (IsValid(StartEndpoint.TargetComponent))
-	{
-		IgnoredActors.AddUnique(StartEndpoint.TargetComponent->GetOwner());
-	}
-	if (IsValid(EndEndpoint.TargetComponent))
-	{
-		IgnoredActors.AddUnique(EndEndpoint.TargetComponent->GetOwner());
-	}
-	RuntimeState->EndpointResolver.AppendResolvedActors(IgnoredActors);
-
-	CableSim::FStepInput Input = BuildStepInput(InterpolationAlpha);
-	PerformTautStep(Input, IgnoredActors);
-	StartEndpointConstraint = RuntimeState->EndpointConstraints[0];
-	EndEndpointConstraint = RuntimeState->EndpointConstraints[1];
-	RuntimeState->ContactCache.BeginStep();
-	Solver.AdvanceStep(Input, [this, &IgnoredActors](
-		const TConstArrayView<CableSim::FParticle> Particles,
-		TArray<CableSim::FContactConstraint>& OutContacts)
-	{
-		FCableSimWorldCollisionAdapter::GatherContacts(
-			GetWorld(),
-			GetOwner(),
-			IgnoredActors,
-			CollisionSettings,
-			FrictionSettings,
-			Particles,
-			RuntimeState->ContactCache,
-			OutContacts);
-	});
-	RuntimeState->ContactCache.EndStep(CollisionSettings.ContactPersistenceSteps);
-	RuntimeState->PreviousSolvedPositions = MoveTemp(RuntimeState->CurrentSolvedPositions);
-	RuntimeState->CurrentSolvedPositions.Reset(Solver.GetParticles().Num());
-	for (const CableSim::FParticle& Particle : Solver.GetParticles())
-	{
-		RuntimeState->CurrentSolvedPositions.Add(Particle.Position);
-	}
-	if (RuntimeState->PreviousSolvedPositions.Num() != RuntimeState->CurrentSolvedPositions.Num())
-	{
-		RuntimeState->PreviousSolvedPositions = RuntimeState->CurrentSolvedPositions;
-	}
-}
-
-void UCableSimComponent::PerformTautStep(
-	CableSim::FStepInput& Input,
-	const TConstArrayView<AActor*> IgnoredActors)
-{
-	if (!TautSettings.bEnableTautSolver)
-	{
-		if (RuntimeState->bTautWasEnabled)
-		{
-			RuntimeState->TautSolver.Reset();
-			RuntimeState->ChaosObjectTracker.Reset();
-			RuntimeState->ChaosSnapshot.Reset();
-			RuntimeState->SupportedTautEdges.Reset();
-		}
-		RuntimeState->bTautWasEnabled = false;
-		RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
-		for (FCableSimEndpointConstraint& Constraint : RuntimeState->EndpointConstraints)
-		{
-			Constraint = FCableSimEndpointConstraint{};
-			Constraint.Status = ECableSimEndpointConstraintStatus::Disabled;
-		}
-		return;
-	}
-
-	const int32 ConstrainedIndex = TautSettings.ConstrainedEndpoint == ECableSimEndpoint::Start ? 0 : 1;
-	const int32 AnchorIndex = 1 - ConstrainedIndex;
-	const FCableSimEndpointBinding& ConstrainedBinding = ConstrainedIndex == 0 ? StartEndpoint : EndEndpoint;
-	const FCableSimEndpointBinding& AnchorBinding = AnchorIndex == 0 ? StartEndpoint : EndEndpoint;
-	const bool bSupportedEndpointConfiguration =
-		ConstrainedBinding.Mode != ECableSimEndpointMode::Simulated
-		&& AnchorBinding.Mode != ECableSimEndpointMode::Simulated;
-
+	FVector3d RequestedTargets[2] = {
+		FMath::Lerp(RuntimeState->LastFrameTargets[0], RuntimeState->CurrentFrameTargets[0], FrameAlpha),
+		FMath::Lerp(RuntimeState->LastFrameTargets[1], RuntimeState->CurrentFrameTargets[1], FrameAlpha)};
+	const TArray<CableSim::FParticle>& InitialParticles = RuntimeState->Solver.GetParticles();
+	FVector3d CollisionTargets[2] = {RequestedTargets[0], RequestedTargets[1]};
+	const double MaximumDrivenTravel = FMath::Max(SimulationSettings.DrivenEndpointMaximumSpeed, 1.0)
+		* OuterDeltaTime;
 	for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
 	{
-		FCableSimEndpointConstraint& Constraint = RuntimeState->EndpointConstraints[EndpointIndex];
-		Constraint = FCableSimEndpointConstraint{};
-		Constraint.Endpoint = EndpointIndex == 0 ? ECableSimEndpoint::Start : ECableSimEndpoint::End;
-		Constraint.Status = ECableSimEndpointConstraintStatus::UnsupportedEndpointConfiguration;
-		Constraint.RequestedWorldPosition = FVector(EndpointIndex == 0
-			? Input.StartEndpoint.TargetPosition
-			: Input.EndEndpoint.TargetPosition);
-		Constraint.ReachableWorldPosition = Constraint.RequestedWorldPosition;
-		Constraint.RestLength = SimulationSettings.RestLength;
+		const FCableSimEndpointBinding& Endpoint = EndpointIndex == 0 ? StartEndpoint : EndEndpoint;
+		if (Endpoint.State != ECableSimEndpointState::Driven) continue;
+		const FVector3d Current = EndpointIndex == 0 ? InitialParticles[0].Position : InitialParticles.Last().Position;
+		const FVector3d Delta = RequestedTargets[EndpointIndex] - Current;
+		const double Distance = Delta.Length();
+		if (Distance > MaximumDrivenTravel && Distance > UE_DOUBLE_SMALL_NUMBER)
+			CollisionTargets[EndpointIndex] = Current + Delta * (MaximumDrivenTravel / Distance);
 	}
-	if (bSupportedEndpointConfiguration)
+	TArray<AActor*> IgnoredActors;
+	if (IsValid(GetOwner()))
 	{
-		RuntimeState->EndpointConstraints[AnchorIndex].Status = ECableSimEndpointConstraintStatus::Disabled;
-		if (!TautSettings.bEnableReachConstraint)
-		{
-			RuntimeState->EndpointConstraints[ConstrainedIndex].Status = ECableSimEndpointConstraintStatus::Disabled;
-		}
+		IgnoredActors.Add(GetOwner());
 	}
-
-	auto ApplyConstrainedPosition = [this, &Input, ConstrainedIndex](const FVector3d& Position)
-	{
-		CableSim::FEndpointStepInput& EndpointInput = ConstrainedIndex == 0
-			? Input.StartEndpoint
-			: Input.EndEndpoint;
-		const int32 ParticleIndex = ConstrainedIndex == 0 ? 0 : Solver.GetParticles().Num() - 1;
-		EndpointInput.TargetPosition = Position;
-		EndpointInput.TargetVelocity = (Position - Solver.GetParticles()[ParticleIndex].Position) / Input.DeltaTime;
-	};
-	auto FreezeAtLastAcceptedPosition = [this, &ApplyConstrainedPosition, ConstrainedIndex]()
-	{
-		FCableSimEndpointConstraint& Constraint = RuntimeState->EndpointConstraints[ConstrainedIndex];
-		Constraint.Status = ECableSimEndpointConstraintStatus::TautPathUnavailable;
-		if (!RuntimeState->bHasAcceptedReachablePosition[ConstrainedIndex])
-		{
-			return;
-		}
-		const FVector3d FrozenPosition = RuntimeState->LastAcceptedReachablePositions[ConstrainedIndex];
-		Constraint.ReachableWorldPosition = FVector(FrozenPosition);
-		Constraint.CorrectionWorld = Constraint.ReachableWorldPosition - Constraint.RequestedWorldPosition;
-		Constraint.ConstraintDirection = Constraint.CorrectionWorld.GetSafeNormal();
-		Constraint.bLimited = !Constraint.CorrectionWorld.IsNearlyZero();
-		ApplyConstrainedPosition(FrozenPosition);
-	};
-
-	CableSim::FTautConfig TautConfig;
-	TautConfig.TopologyTolerance = FMath::Max(TautSettings.TopologyTolerance, 0.001);
-	TautConfig.MaximumCollisionPasses = FMath::Clamp(TautSettings.MaximumCollisionPasses, 2, 64);
-	const bool bConfigChanged = !FMath::IsNearlyEqual(
-		TautConfig.TopologyTolerance,
-		RuntimeState->AppliedTautConfig.TopologyTolerance,
-		1.e-9)
-		|| TautConfig.MaximumCollisionPasses != RuntimeState->AppliedTautConfig.MaximumCollisionPasses;
-	if (!RuntimeState->bTautWasEnabled || !RuntimeState->TautSolver.IsInitialized() || bConfigChanged)
-	{
-		const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
-		if (Particles.Num() < 2 || !RuntimeState->TautSolver.Initialize(
-			Particles[0].Position,
-			Particles.Last().Position,
-			TautConfig))
-		{
-			RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
-			RuntimeState->TautDiagnostics.Status = ECableSimTautStatus::InvalidConfiguration;
-			if (bSupportedEndpointConfiguration && TautSettings.bEnableReachConstraint)
-			{
-				FreezeAtLastAcceptedPosition();
-			}
-			return;
-		}
-		RuntimeState->AppliedTautConfig = TautConfig;
-	}
-	RuntimeState->bTautWasEnabled = true;
-
-	FCableSimTautDiagnostics Diagnostics;
-	const bool bSnapshotSucceeded = FCableSimChaosCollisionAdapter::GatherSnapshot(
+	const double StartTime = FPlatformTime::Seconds();
+	const bool bGeometryReady = FCableSimWorldCollisionProvider::GatherSnapshot(
 		GetWorld(),
 		GetOwner(),
 		IgnoredActors,
 		CollisionSettings,
-		TautConfig.TopologyTolerance,
-		Solver.GetParticles(),
-		Input.StartEndpoint.TargetPosition,
-		Input.EndEndpoint.TargetPosition,
-		RuntimeState->ChaosObjectTracker,
-		RuntimeState->ChaosSnapshot);
-	const FCableSimChaosSnapshotDiagnostics& SnapshotDiagnostics = RuntimeState->ChaosSnapshot.Diagnostics;
-	Diagnostics.bSnapshotSucceeded = bSnapshotSucceeded;
-	Diagnostics.bFeatureBudgetExceeded = SnapshotDiagnostics.bFeatureBudgetExceeded;
-	Diagnostics.OverlapCount = SnapshotDiagnostics.OverlapCount;
-	Diagnostics.PhysicsObjectCount = SnapshotDiagnostics.PhysicsObjectCount;
-	Diagnostics.ShapeCount = SnapshotDiagnostics.ShapeCount;
-	Diagnostics.TriangleCount = SnapshotDiagnostics.TriangleCount;
-	Diagnostics.ExtractedEdgeCount = SnapshotDiagnostics.EdgeCount;
-	Diagnostics.ExtractedVertexCount = SnapshotDiagnostics.VertexCount;
-	Diagnostics.OverValenceVertexCount = SnapshotDiagnostics.OverValenceVertexCount;
-	Diagnostics.SnapshotMilliseconds = SnapshotDiagnostics.SnapshotMilliseconds;
-	Diagnostics.TopologyCompileMilliseconds = SnapshotDiagnostics.CompileMilliseconds;
-	RuntimeState->SupportedTautEdges.Reset();
-	if (!bSnapshotSucceeded)
-	{
-		Diagnostics.Status = ECableSimTautStatus::SnapshotFailed;
-		RuntimeState->TautDiagnostics = Diagnostics;
-		if (bSupportedEndpointConfiguration && TautSettings.bEnableReachConstraint)
-		{
-			FreezeAtLastAcceptedPosition();
-		}
-		return;
-	}
+		InitialParticles,
+		CollisionTargets[0],
+		CollisionTargets[1],
+		OuterDeltaTime,
+		RuntimeState->ObjectTracker,
+		RuntimeState->CollisionSnapshot);
 
-	for (const CableSim::FCollisionEdge& Edge : RuntimeState->ChaosSnapshot.Edges)
+	FCableSimCollisionDiagnostics CollisionDiagnostics = RuntimeState->CollisionSnapshot.Diagnostics;
+	TArray<CableSim::FContactConstraint> Contacts;
+	TArray<FVector3d> RejectedPoints;
+	CableSim::FStepResult CoreResult = RuntimeState->Solver.GetLastResult();
+	CableSim::FStepInput Input;
+	Input.DeltaTime = OuterDeltaTime;
+	Input.StartEndpoint.State = ToCoreState(StartEndpoint.State);
+	Input.EndEndpoint.State = ToCoreState(EndEndpoint.State);
+	Input.StartEndpoint.TargetPosition = RequestedTargets[0];
+	Input.EndEndpoint.TargetPosition = RequestedTargets[1];
+	for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
 	{
-		const bool bSupportedGeometry = Edge.GeometryType == CableSim::ECollisionGeometryType::Box
-			|| Edge.GeometryType == CableSim::ECollisionGeometryType::Convex;
-		if (Edge.bStaticObject && bSupportedGeometry)
+		CableSim::FEndpointInput& EndpointInput = EndpointIndex == 0 ? Input.StartEndpoint : Input.EndEndpoint;
+		const FCableSimEndpointBinding& EndpointBinding = EndpointIndex == 0 ? StartEndpoint : EndEndpoint;
+		if (RuntimeState->bHasManualVelocity[EndpointIndex])
 		{
-			RuntimeState->SupportedTautEdges.Add(Edge);
+			EndpointInput.TargetVelocity = RuntimeState->ManualVelocities[EndpointIndex];
+		}
+		else if (EndpointBinding.TargetSpace == ECableSimTargetSpace::Component
+			&& IsValid(EndpointBinding.TargetComponent))
+		{
+			EndpointInput.TargetVelocity = FVector3d(EndpointBinding.TargetComponent->GetComponentVelocity());
 		}
 	}
-	Diagnostics.SupportedEdgeCount = RuntimeState->SupportedTautEdges.Num();
-	CableSim::FTautStepInput TautInput;
-	TautInput.StartTarget = Input.StartEndpoint.TargetPosition;
-	TautInput.EndTarget = Input.EndEndpoint.TargetPosition;
-	const double SolverStart = FPlatformTime::Seconds();
-	CableSim::FTautStepResult Result = RuntimeState->TautSolver.AdvanceStep(
-		TautInput,
-		RuntimeState->SupportedTautEdges);
-
-	for (FCableSimEndpointConstraint& Constraint : RuntimeState->EndpointConstraints)
+	if (RuntimeState->Solver.BeginStep(Input))
 	{
-		Constraint.PathLength = Result.PathLength;
-		Constraint.ExcessDistance = FMath::Max(Result.PathLength - SimulationSettings.RestLength, 0.0);
-	}
-
-	const bool bSupportedResult = Result.Status == CableSim::ETautStatus::Ready
-		|| Result.Status == CableSim::ETautStatus::NoRelevantGeometry;
-	if (bSupportedEndpointConfiguration && TautSettings.bEnableReachConstraint)
-	{
-		FCableSimEndpointConstraint& Constraint = RuntimeState->EndpointConstraints[ConstrainedIndex];
-		if (!bSupportedResult)
+		FCableSimWorldCollisionProvider::CompileContacts(
+			RuntimeState->CollisionSnapshot,
+			CollisionSettings,
+			FrictionSettings,
+			RuntimeState->Solver,
+			Input,
+			Contacts,
+			RejectedPoints,
+			CollisionDiagnostics);
+		RuntimeState->Solver.SolveBatch(Input, Contacts, RuntimeState->AppliedConfig.SolverIterations);
+		TArray<CableSim::FContactConstraint> AdditionalContacts;
+		TArray<FVector3d> AdditionalRejected;
+		FCableSimWorldCollisionProvider::CompileContacts(
+			RuntimeState->CollisionSnapshot,
+			CollisionSettings,
+			FrictionSettings,
+			RuntimeState->Solver,
+			Input,
+			AdditionalContacts,
+			AdditionalRejected,
+			CollisionDiagnostics);
+		for (CableSim::FContactConstraint& Additional : AdditionalContacts)
 		{
-			FreezeAtLastAcceptedPosition();
-		}
-		else if (Result.PathLength <= SimulationSettings.RestLength + TautSettings.LengthTolerance)
-		{
-			Constraint.Status = ECableSimEndpointConstraintStatus::ValidSlack;
-			RuntimeState->LastAcceptedReachablePositions[ConstrainedIndex] = ConstrainedIndex == 0
-				? TautInput.StartTarget
-				: TautInput.EndTarget;
-			RuntimeState->bHasAcceptedReachablePosition[ConstrainedIndex] = true;
-		}
-		else
-		{
-			FVector3d ReachablePoint;
-			double ExcessDistance = 0.0;
-			if (!RuntimeState->TautSolver.CalculateReachableEndpoint(
-				ConstrainedIndex == 0,
-				SimulationSettings.RestLength,
-				ReachablePoint,
-				ExcessDistance))
+			const bool bExists = Contacts.ContainsByPredicate([&](const CableSim::FContactConstraint& Existing)
 			{
-				FreezeAtLastAcceptedPosition();
-			}
-			else
-			{
-				const FVector3d RequestedPoint = ConstrainedIndex == 0
-					? TautInput.StartTarget
-					: TautInput.EndTarget;
-				Constraint.Status = ECableSimEndpointConstraintStatus::Limited;
-				Constraint.bLimited = true;
-				Constraint.ExcessDistance = ExcessDistance;
-				Constraint.ReachableWorldPosition = FVector(ReachablePoint);
-				Constraint.CorrectionWorld = FVector(ReachablePoint - RequestedPoint);
-				Constraint.ConstraintDirection = Constraint.CorrectionWorld.GetSafeNormal();
-				ApplyConstrainedPosition(ReachablePoint);
-				(ConstrainedIndex == 0 ? TautInput.StartTarget : TautInput.EndTarget) = ReachablePoint;
-				RuntimeState->LastAcceptedReachablePositions[ConstrainedIndex] = ReachablePoint;
-				RuntimeState->bHasAcceptedReachablePosition[ConstrainedIndex] = true;
-				Result = RuntimeState->TautSolver.AdvanceStep(TautInput, RuntimeState->SupportedTautEdges);
-				Constraint.PathLength = Result.PathLength;
-			}
+				return Existing.ParticleA == Additional.ParticleA
+					&& Existing.ParticleB == Additional.ParticleB
+					&& Existing.FeatureId == Additional.FeatureId;
+			});
+			if (!bExists) Contacts.Add(MoveTemp(Additional));
 		}
+		RejectedPoints.Append(AdditionalRejected);
+		RuntimeState->Solver.ReconcileContacts(Input, Contacts, 4);
+		CoreResult = RuntimeState->Solver.FinalizeStep(Input, Contacts);
 	}
 
-	BuildTautGuideConstraints(Input);
-	Diagnostics.SolverMilliseconds = (FPlatformTime::Seconds() - SolverStart) * 1000.0;
-	Diagnostics.Status = ToRuntimeTautStatus(Result.Status);
-	Diagnostics.StepIndex = static_cast<int64>(Result.StepIndex);
-	Diagnostics.PointCount = Result.PointCount;
-	Diagnostics.ContactCount = Result.ContactCount;
-	Diagnostics.PathLength = Result.PathLength;
-	RuntimeState->TautDiagnostics = Diagnostics;
-}
-
-void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) const
-{
-	Input.GuideConstraints.Reset();
-	const TArray<CableSim::FTautPoint>& Points = RuntimeState->TautSolver.GetPoints();
-	const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
-	if (Points.Num() < 2 || Particles.Num() < 3 || SimulationSettings.RestLength <= 0.0)
+	RuntimeState->PreviousPositions = MoveTemp(RuntimeState->CurrentPositions);
+	RuntimeState->CurrentPositions.Reset(RuntimeState->Solver.GetParticles().Num());
+	for (const CableSim::FParticle& Particle : RuntimeState->Solver.GetParticles())
 	{
-		return;
+		RuntimeState->CurrentPositions.Add(Particle.Position);
 	}
-	const CableSim::ETautStatus Status = RuntimeState->TautSolver.GetLastResult().Status;
-	if (Status != CableSim::ETautStatus::Ready && Status != CableSim::ETautStatus::NoRelevantGeometry)
+	if (RuntimeState->PreviousPositions.Num() != RuntimeState->CurrentPositions.Num())
 	{
-		return;
+		RuntimeState->PreviousPositions = RuntimeState->CurrentPositions;
 	}
-	const double PathLength = CalculatePolylineLength(Points);
-	const double PathRatio = PathLength / SimulationSettings.RestLength;
-	const double ActivationRatio = FMath::Clamp(TautSettings.GuideActivationPathRatio, 0.0, 1.0);
-	if (PathRatio < ActivationRatio)
+	RuntimeState->DebugContactPoints.Reset();
+	RuntimeState->DebugContacts = Contacts;
+	RuntimeState->DebugRejectedPoints = RejectedPoints;
+	for (const CableSim::FContactConstraint& Contact : Contacts)
 	{
-		return;
-	}
-	const double ActivationAlpha = ActivationRatio >= 1.0 - 1.e-9
-		? 1.0
-		: FMath::SmoothStep(
-			0.0,
-			1.0,
-			FMath::Clamp((PathRatio - ActivationRatio) / (1.0 - ActivationRatio), 0.0, 1.0));
-	if (ActivationAlpha <= 0.0)
-	{
-		return;
-	}
-	const double Slack = FMath::Max(SimulationSettings.RestLength - PathLength, 0.0);
-	const double BaseRadius = FMath::Min(
-		Slack * FMath::Max(TautSettings.GuideSlackScale, 0.0),
-		FMath::Max(TautSettings.MaximumGuideRadius, 0.0));
-	for (int32 ParticleIndex = 1; ParticleIndex + 1 < Particles.Num(); ++ParticleIndex)
-	{
-		if (Particles[ParticleIndex].Mode != CableSim::EParticleMode::Dynamic)
+		if (!RuntimeState->Solver.GetParticles().IsValidIndex(Contact.ParticleA))
 		{
 			continue;
 		}
-		const double Alpha = FMath::Clamp(
-			Particles[ParticleIndex].MaterialCoordinate / SimulationSettings.RestLength,
-			0.0,
-			1.0);
-		CableSim::FGuideConstraint& Guide = Input.GuideConstraints.AddDefaulted_GetRef();
-		Guide.ParticleIndex = ParticleIndex;
-		Guide.TargetPosition = SamplePolyline(Points, Alpha);
-		Guide.MaximumDistance = BaseRadius * FMath::Sin(UE_PI * Alpha);
-		Guide.StepStrength = FMath::Clamp(TautSettings.GuideStepStrength, 0.0, 1.0) * ActivationAlpha;
+		const TArray<CableSim::FParticle>& Particles = RuntimeState->Solver.GetParticles();
+		const FVector3d Point = Particles[Contact.ParticleA].Position * (1.0 - Contact.SegmentAlpha)
+			+ (Particles.IsValidIndex(Contact.ParticleB)
+				? Particles[Contact.ParticleB].Position * Contact.SegmentAlpha
+				: FVector3d::ZeroVector);
+		RuntimeState->DebugContactPoints.Add(Point);
+	}
+
+	RuntimeState->Status = FCableSimStatus{};
+	RuntimeState->Status.Status = bGeometryReady
+		? ToRuntimeStatus(CoreResult.Status)
+		: ECableSimSimulationStatus::CollisionBudgetExceeded;
+	RuntimeState->Status.StepIndex = static_cast<int64>(RuntimeState->Solver.GetLastResult().StepIndex);
+	RuntimeState->Status.ParticleCount = RuntimeState->Solver.GetParticles().Num();
+	RuntimeState->Status.ContactCount = Contacts.Num();
+	RuntimeState->Status.CollisionQueryCount = RuntimeState->CollisionSnapshot.Diagnostics.QueryCount;
+	RuntimeState->Status.CollisionTriangleCount = RuntimeState->CollisionSnapshot.Diagnostics.TriangleCount;
+	RuntimeState->Status.ConvexEdgeCount = RuntimeState->CollisionSnapshot.Diagnostics.ConvexEdgeCount;
+	RuntimeState->Status.RejectedContactCount = CollisionDiagnostics.RejectedContactCount;
+	RuntimeState->Status.MaximumSegmentError = CoreResult.MaximumSegmentError;
+	RuntimeState->Status.MaximumPenetration = CoreResult.MaximumPenetration;
+	RuntimeState->Status.MaximumSegmentStrain = CoreResult.MaximumSegmentStrain;
+	RuntimeState->Status.MaximumContactCorrection = CoreResult.MaximumContactCorrection;
+	RuntimeState->Status.MaximumEstimatedTension = CoreResult.MaximumEstimatedTension;
+	RuntimeState->Status.MaximumEstimatedNormalLoad = CoreResult.MaximumEstimatedNormalLoad;
+	RuntimeState->Status.AcceptedMovementFraction = 1.0;
+	RuntimeState->Status.SimulationMilliseconds = (FPlatformTime::Seconds() - StartTime) * 1000.0;
+	RuntimeState->Status.bMotionClamped = false;
+	RuntimeState->Status.bCollisionDegraded = CollisionDiagnostics.bFeatureBudgetExceeded
+		|| CollisionDiagnostics.UnsupportedShapeCount > 0;
+	RuntimeState->Status.ActiveLength = RuntimeState->Solver.GetActiveLength();
+	RuntimeState->Status.TargetLength = RuntimeState->TargetLength;
+	RuntimeState->Status.MaximumLength = EffectiveMaximumCableLength(SimulationSettings);
+	RuntimeState->Status.LengthChangeOrigin = RuntimeState->LengthOrigin;
+	RuntimeState->Status.bLengthChanging = IsLengthChanging();
+	RuntimeState->Status.bLengthClamped = RuntimeState->bLengthClamped;
+	RuntimeState->Status.bBindingFailure = !RuntimeState->bEndpointBindingValid[0]
+		|| !RuntimeState->bEndpointBindingValid[1];
+
+	for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
+	{
+		FCableSimEndpointResult& Result = RuntimeState->EndpointResults[EndpointIndex];
+		const TArray<CableSim::FParticle>& Particles = RuntimeState->Solver.GetParticles();
+		const CableSim::FParticle& Particle = EndpointIndex == 0 ? Particles[0] : Particles.Last();
+		Result.State = EndpointIndex == 0 ? StartEndpoint.State : EndEndpoint.State;
+		Result.RequestedWorldPosition = FVector(RequestedTargets[EndpointIndex]);
+		Result.AcceptedWorldPosition = FVector(Particle.Position);
+		Result.Velocity = FVector(Particle.Velocity);
+		Result.CorrectionWorld = Result.AcceptedWorldPosition - Result.RequestedWorldPosition;
+		Result.LimitError = Result.CorrectionWorld.Length();
+		Result.bLimited = Result.State == ECableSimEndpointState::Driven && Result.LimitError > 0.1;
+		Result.bBindingValid = RuntimeState->bEndpointBindingValid[EndpointIndex];
+		if (Result.State == ECableSimEndpointState::Driven)
+		{
+			const FVector3d Initial = EndpointIndex == 0 ? InitialParticles[0].PreviousPosition : InitialParticles.Last().PreviousPosition;
+			const FVector3d RequestedDelta = RequestedTargets[EndpointIndex] - Initial;
+			const double RequestedDistanceSquared = RequestedDelta.SquaredLength();
+			if (RequestedDistanceSquared > UE_DOUBLE_SMALL_NUMBER)
+			{
+				const double Progress = FVector3d::DotProduct(Particle.Position - Initial, RequestedDelta)
+					/ RequestedDistanceSquared;
+				RuntimeState->Status.AcceptedMovementFraction = FMath::Min(
+					RuntimeState->Status.AcceptedMovementFraction,
+					FMath::Clamp(Progress, 0.0, 1.0));
+			}
+			RuntimeState->Status.bMotionClamped |= Result.bLimited;
+		}
+		if (Result.bLimited && RuntimeState->Status.Status == ECableSimSimulationStatus::Ready)
+		{
+			RuntimeState->Status.Status = ECableSimSimulationStatus::MovementLimited;
+		}
 	}
 }
 
 void UCableSimComponent::RefreshEditorPreview()
 {
-	const UWorld* World = GetWorld();
-	if (!World || World->IsGameWorld())
+	auto PreviewPosition = [this](const FCableSimEndpointBinding& Endpoint)
 	{
-		return;
-	}
-
-	auto ResolvePreviewEndpoint = [this](const FCableSimEndpointBinding& Binding, const ECableSimEndpoint Endpoint)
-	{
-		if (Binding.Mode == ECableSimEndpointMode::Simulated)
+		if (Endpoint.State == ECableSimEndpointState::Free)
+			return FVector3d(GetComponentTransform().TransformPosition(Endpoint.SpawnLocalPosition));
+		if (Endpoint.TargetSpace == ECableSimTargetSpace::World) return FVector3d(Endpoint.WorldTarget);
+		if (Endpoint.TargetSpace == ECableSimTargetSpace::Component && IsValid(Endpoint.TargetComponent))
 		{
-			return FVector3d(GetComponentTransform().TransformPosition(Binding.SpawnLocalPosition));
+			const FTransform Transform = Endpoint.SocketName.IsNone()
+				? Endpoint.TargetComponent->GetComponentTransform()
+				: Endpoint.TargetComponent->GetSocketTransform(Endpoint.SocketName);
+			return FVector3d(Transform.TransformPosition(Endpoint.ComponentLocalOffset));
 		}
-		FVector3d Position;
-		ECableSimEndpointBindingStatus Status;
-		if (RuntimeState->EndpointResolver.Resolve(*this, Binding, Endpoint, Position, Status))
-		{
-			return Position;
-		}
-		return FVector3d(GetComponentTransform().TransformPosition(Binding.SpawnLocalPosition));
+		return FVector3d(GetComponentTransform().TransformPosition(Endpoint.LocalTarget));
 	};
-
-	const FVector3d Start = ResolvePreviewEndpoint(StartEndpoint, ECableSimEndpoint::Start);
-	const FVector3d End = ResolvePreviewEndpoint(EndEndpoint, ECableSimEndpoint::End);
-	const CableSim::FSimulationConfig Config = BuildCoreConfig();
-	const bool bChanged = !RuntimeState->bHasEditorPreview
-		|| !Start.Equals(RuntimeState->EditorPreviewEndpoints[0], 1.e-4)
-		|| !End.Equals(RuntimeState->EditorPreviewEndpoints[1], 1.e-4)
-		|| !Config.Equals(RuntimeState->AppliedConfig);
-	if (!bChanged)
+	const FVector3d Start = PreviewPosition(StartEndpoint);
+	const FVector3d End = PreviewPosition(EndEndpoint);
+	const double Length = FMath::Clamp(
+		SimulationSettings.RestLength,
+		1.0,
+		EffectiveMaximumCableLength(SimulationSettings));
+	const int32 Segments = FMath::Clamp(
+		FMath::CeilToInt(Length / FMath::Max(SimulationSettings.NodeSpacing, 1.0)),
+		1,
+		FMath::Max(SimulationSettings.MaximumParticles - 1, 1));
+	RuntimeState->PreviousPositions.Reset(Segments + 1);
+	RuntimeState->CurrentPositions.Reset(Segments + 1);
+	for (int32 Index = 0; Index <= Segments; ++Index)
 	{
-		return;
+		const FVector3d Position = FMath::Lerp(Start, End, static_cast<double>(Index) / Segments);
+		RuntimeState->PreviousPositions.Add(Position);
+		RuntimeState->CurrentPositions.Add(Position);
 	}
-
-	RuntimeState->EndpointResolver.Reset();
-	RuntimeState->EditorPreviewEndpoints[0] = Start;
-	RuntimeState->EditorPreviewEndpoints[1] = End;
-	RuntimeState->bHasEditorPreview = true;
-	RuntimeState->AppliedConfig = Config;
-	Solver.Initialize(Start, End, Config);
-	RuntimeState->PreviousSolvedPositions.Reset();
-	RuntimeState->CurrentSolvedPositions.Reset();
-	for (const CableSim::FParticle& Particle : Solver.GetParticles())
-	{
-		RuntimeState->PreviousSolvedPositions.Add(Particle.Position);
-		RuntimeState->CurrentSolvedPositions.Add(Particle.Position);
-	}
-	RuntimeState->RenderInterpolationAlpha = 1.0;
-	RuntimeState->TautSolver.Reset();
-	RuntimeState->ChaosSnapshot.Reset();
-	RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
+	RuntimeState->RenderAlpha = 1.0;
 }
 
 void UCableSimComponent::RefreshVisualization()
 {
-	if (!IsRegistered())
-	{
-		return;
-	}
-	UpdateBounds();
+#if !UE_BUILD_SHIPPING
 	MarkRenderStateDirty();
+#endif
 }
 
 FBoxSphereBounds UCableSimComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	FBox Bounds(ForceInit);
-	for (const FVector& Position : GetRenderPolyline())
+	FBox Box(ForceInit);
+	for (const FVector3d& Point : RuntimeState->CurrentPositions)
 	{
-		Bounds += Position;
+		Box += FVector(Point);
 	}
-	for (const CableSim::FTautPoint& Point : RuntimeState->TautSolver.GetPoints())
+	if (!Box.IsValid)
 	{
-		Bounds += FVector(Point.Position);
+		Box = FBox(GetComponentLocation(), GetComponentLocation());
 	}
-	if (DebugSettings.bDraw && RuntimeState->ChaosSnapshot.QueryBounds.IsValid)
-	{
-		Bounds += RuntimeState->ChaosSnapshot.QueryBounds;
-	}
-	if (!Bounds.IsValid)
-	{
-		Bounds = FBox(LocalToWorld.GetLocation() - FVector(1.0), LocalToWorld.GetLocation() + FVector(1.0));
-	}
-	return FBoxSphereBounds(Bounds.ExpandBy(50.0));
+	return FBoxSphereBounds(Box.ExpandBy(FMath::Max(CollisionSettings.Radius, 10.0)));
 }
 
 #if WITH_EDITOR
 void UCableSimComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	RuntimeState->EndpointResolver.Reset();
+	RuntimeState->bLegacyMigrated = false;
+	MigrateLegacyBindings();
 	RefreshEditorPreview();
 	RefreshVisualization();
 }
@@ -1161,163 +1108,30 @@ void UCableSimComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 
 FDebugRenderSceneProxy* UCableSimComponent::CreateDebugSceneProxy()
 {
-	const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
-	const TArray<FVector> RenderPositions = GetRenderPolyline();
-	if ((!PreviewSettings.bVisible && !DebugSettings.bDraw) || Particles.Num() < 2 || RenderPositions.Num() != Particles.Num())
-	{
-		return nullptr;
-	}
-
-	FCableSimDebugRenderSceneProxy* Proxy = new FCableSimDebugRenderSceneProxy(this);
-	if (PreviewSettings.bVisible)
-	{
-		const FColor PreviewColor = PreviewSettings.Color.ToFColor(true);
-		for (int32 Index = 0; Index + 1 < RenderPositions.Num(); ++Index)
-		{
-			Proxy->Lines.Emplace(
-				RenderPositions[Index],
-				RenderPositions[Index + 1],
-				PreviewColor,
-				PreviewSettings.LineThickness);
-		}
-	}
-
 #if UE_BUILD_SHIPPING
-	return Proxy;
+	return nullptr;
 #else
 	if (!DebugSettings.bDraw)
 	{
-		return Proxy;
+		return nullptr;
 	}
-	auto HasFlag = [this](const ECableSimDebugDraw Flag)
+	TArray<FVector3d> Polyline;
+	const int32 Count = RuntimeState->CurrentPositions.Num();
+	Polyline.Reserve(Count);
+	for (int32 Index = 0; Index < Count; ++Index)
 	{
-		return (DebugSettings.DrawFlags & (1 << static_cast<uint8>(Flag))) != 0;
-	};
-	if (HasFlag(ECableSimDebugDraw::Particles))
-	{
-		for (int32 Index = 0; Index < RenderPositions.Num(); ++Index)
-		{
-			const FLinearColor Color = Particles[Index].Mode == CableSim::EParticleMode::Kinematic
-				? FLinearColor(FColor::Orange)
-				: FLinearColor::White;
-			Proxy->Spheres.Emplace(
-				3.0f,
-				RenderPositions[Index],
-				Color,
-				FDebugRenderSceneProxy::EDrawType::SolidAndWireMeshes);
-		}
+		const FVector3d Previous = RuntimeState->PreviousPositions.IsValidIndex(Index)
+			? RuntimeState->PreviousPositions[Index]
+			: RuntimeState->CurrentPositions[Index];
+		Polyline.Add(FMath::Lerp(Previous, RuntimeState->CurrentPositions[Index], RuntimeState->RenderAlpha));
 	}
-	if (HasFlag(ECableSimDebugDraw::ActiveContacts) || HasFlag(ECableSimDebugDraw::Friction))
-	{
-		const double MaximumLoad = FMath::Max(Solver.GetLastStepResult().MaximumEstimatedNormalLoad, 1.e-6);
-		for (const CableSim::FContactDiagnostic& Diagnostic : Solver.GetLastContactDiagnostics())
-		{
-			if (!Diagnostic.bProjected || !Particles.IsValidIndex(Diagnostic.ParticleIndex))
-			{
-				continue;
-			}
-			const FVector Position(Particles[Diagnostic.ParticleIndex].Position);
-			if (HasFlag(ECableSimDebugDraw::ActiveContacts))
-			{
-				Proxy->ArrowLines.Emplace(Position, Position + FVector(Diagnostic.Normal) * 18.0, FColor::Yellow, 5.0f);
-			}
-			if (HasFlag(ECableSimDebugDraw::Friction))
-			{
-				const float LoadRatio = static_cast<float>(FMath::Clamp(Diagnostic.EstimatedNormalLoad / MaximumLoad, 0.0, 1.0));
-				const FColor HeatColor = FColor::MakeRedToGreenColorFromScalar(1.0f - LoadRatio);
-				Proxy->Spheres.Emplace(3.0f + 4.0f * LoadRatio, Position, FLinearColor(HeatColor), FDebugRenderSceneProxy::EDrawType::WireMesh);
-			}
-		}
-	}
-
-	if (!TautSettings.bEnableTautSolver)
-	{
-		return Proxy;
-	}
-	if (HasFlag(ECableSimDebugDraw::SnapshotBounds) && RuntimeState->ChaosSnapshot.QueryBounds.IsValid)
-	{
-		Proxy->Boxes.Emplace(
-			RuntimeState->ChaosSnapshot.QueryBounds,
-			FColor(180, 60, 255),
-			FDebugRenderSceneProxy::EDrawType::WireMesh,
-			DebugSettings.LineThickness);
-	}
-	if (HasFlag(ECableSimDebugDraw::CandidateTopology))
-	{
-		for (const CableSim::FCollisionEdge& Edge : RuntimeState->ChaosSnapshot.Edges)
-		{
-			Proxy->Lines.Emplace(FVector(Edge.Start), FVector(Edge.End), GetEdgeDebugColor(Edge.Kind), DebugSettings.LineThickness);
-		}
-	}
-	const TArray<CableSim::FTautPoint>& TautPoints = RuntimeState->TautSolver.GetPoints();
-	if (HasFlag(ECableSimDebugDraw::TautPathAndGuide))
-	{
-		const bool bHasContact = TautPoints.ContainsByPredicate([](const CableSim::FTautPoint& Point)
-		{
-			return Point.Type == CableSim::ETautPointType::EdgeContact;
-		});
-		const bool bPathValid = RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::Ready
-			|| RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::NoRelevantGeometry;
-		const FColor PathColor = !bPathValid
-			? FColor(255, 96, 32)
-			: (bHasContact ? FColor(255, 0, 255) : FColor(80, 200, 120));
-		for (int32 Index = 0; Index + 1 < TautPoints.Num(); ++Index)
-		{
-			Proxy->Lines.Emplace(
-				FVector(TautPoints[Index].Position),
-				FVector(TautPoints[Index + 1].Position),
-				PathColor,
-				DebugSettings.LineThickness + 1.0f);
-		}
-		for (const CableSim::FTautPoint& Point : TautPoints)
-		{
-			if (Point.Type == CableSim::ETautPointType::EdgeContact)
-			{
-				Proxy->Spheres.Emplace(4.0f, FVector(Point.Position), FLinearColor::Yellow, FDebugRenderSceneProxy::EDrawType::WireMesh);
-			}
-		}
-	}
-	if (HasFlag(ECableSimDebugDraw::StatusAndReach))
-	{
-		const FString StatusName = StaticEnum<ECableSimTautStatus>()->GetNameStringByValue(static_cast<int64>(RuntimeState->TautDiagnostics.Status));
-		Proxy->Texts.Emplace(
-			FString::Printf(
-				TEXT("Taut: %s | tris %d | verts %d | edges %d/%d | contacts %d | %.2f ms"),
-				*StatusName,
-				RuntimeState->TautDiagnostics.TriangleCount,
-				RuntimeState->TautDiagnostics.ExtractedVertexCount,
-				RuntimeState->TautDiagnostics.SupportedEdgeCount,
-				RuntimeState->TautDiagnostics.ExtractedEdgeCount,
-				RuntimeState->TautDiagnostics.ContactCount,
-				RuntimeState->TautDiagnostics.SnapshotMilliseconds
-					+ RuntimeState->TautDiagnostics.TopologyCompileMilliseconds
-					+ RuntimeState->TautDiagnostics.SolverMilliseconds),
-			FVector(Particles[0].Position) + FVector(0.0, 0.0, 20.0),
-			FLinearColor::White);
-		const int32 ReachIndex = TautSettings.ConstrainedEndpoint == ECableSimEndpoint::Start ? 0 : 1;
-		const FCableSimEndpointConstraint& ReachConstraint = RuntimeState->EndpointConstraints[ReachIndex];
-		const FString ReachStatusName = StaticEnum<ECableSimEndpointConstraintStatus>()->GetNameStringByValue(static_cast<int64>(ReachConstraint.Status));
-		Proxy->Texts.Emplace(
-			FString::Printf(
-				TEXT("Reach: %s | path %.1f / %.1f cm | excess %.1f cm"),
-				*ReachStatusName,
-				ReachConstraint.PathLength,
-				ReachConstraint.RestLength,
-				ReachConstraint.ExcessDistance),
-			FVector(Particles[0].Position) + FVector(0.0, 0.0, 36.0),
-			ReachConstraint.bLimited ? FLinearColor::Yellow : FLinearColor(FColor::Silver));
-		for (const FCableSimEndpointConstraint& Constraint : RuntimeState->EndpointConstraints)
-		{
-			if (Constraint.bLimited)
-			{
-				Proxy->Lines.Emplace(
-					Constraint.RequestedWorldPosition,
-					Constraint.ReachableWorldPosition,
-					FColor::Yellow,
-					DebugSettings.LineThickness + 1.0f);
-			}
-		}
-	}
-	return Proxy;
+	return new FCableSimDebugProxy(
+		this,
+		Polyline,
+		RuntimeState->DebugContactPoints,
+		RuntimeState->DebugRejectedPoints,
+		RuntimeState->CollisionSnapshot,
+		DebugSettings,
+		RuntimeState->Status);
 #endif
 }

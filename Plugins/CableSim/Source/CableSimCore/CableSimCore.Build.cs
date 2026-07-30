@@ -6,10 +6,6 @@ public class CableSimCore : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		CppStandard = CppStandardVersion.Cpp20;
-
-		PublicDependencyModuleNames.AddRange(new[]
-		{
-			"Core"
-		});
+		PublicDependencyModuleNames.Add("Core");
 	}
 }

@@ -1,27 +1,7 @@
 #pragma once
 
-#include "CableSimSolver.h"
-#include "CableSimTautSolver.h"
 #include "Debug/DebugDrawComponent.h"
 #include "CableSimComponent.generated.h"
-
-UENUM(BlueprintType)
-enum class ECableSimEndpointMode : uint8
-{
-	Simulated,
-	CableLocalKinematic,
-	WorldKinematic,
-	ComponentKinematic
-};
-
-UENUM(BlueprintType)
-enum class ECableSimEndpointBindingStatus : uint8
-{
-	Ready,
-	Simulated,
-	MissingComponent,
-	MissingSocket
-};
 
 UENUM(BlueprintType)
 enum class ECableSimEndpoint : uint8
@@ -31,39 +11,54 @@ enum class ECableSimEndpoint : uint8
 };
 
 UENUM(BlueprintType)
+enum class ECableSimEndpointState : uint8
+{
+	Free,
+	Fixed,
+	Driven
+};
+
+UENUM(BlueprintType)
+enum class ECableSimLengthChangeOrigin : uint8
+{
+	Start,
+	End,
+	Both
+};
+
+UENUM(BlueprintType)
+enum class ECableSimTargetSpace : uint8
+{
+	CableLocal,
+	World,
+	Component
+};
+
+// Serialization bridge for the existing playground. New code uses
+// ECableSimEndpointState and ECableSimTargetSpace independently.
+UENUM(meta = (Deprecated, DeprecationMessage = "Use endpoint State and TargetSpace"))
+enum class ECableSimEndpointMode : uint8
+{
+	Simulated,
+	CableLocalKinematic,
+	WorldKinematic,
+	ComponentKinematic
+};
+
+UENUM(BlueprintType)
 enum class ECableSimSimulationStatus : uint8
 {
 	Uninitialized,
 	Ready,
 	Overextended,
-	NumericalFailure,
-	InvalidConfiguration
-};
-
-UENUM(BlueprintType)
-enum class ECableSimTautStatus : uint8
-{
-	Disabled,
-	Uninitialized,
-	Ready,
-	NoRelevantGeometry,
-	NonManifoldTopology,
-	TopologyOverValence,
-	FeatureInvalidated,
-	IterationBudgetExceeded,
-	SnapshotFailed,
+	MotionClamped,
+	MovementLimited,
+	ParticleBudgetExceeded,
+	CollisionBudgetExceeded,
+	InvalidInitialOverlap,
+	CollisionRecoveryFailed,
 	InvalidConfiguration,
 	NumericalFailure
-};
-
-UENUM(BlueprintType)
-enum class ECableSimEndpointConstraintStatus : uint8
-{
-	Disabled,
-	ValidSlack,
-	Limited,
-	UnsupportedEndpointConfiguration,
-	TautPathUnavailable
 };
 
 USTRUCT(BlueprintType)
@@ -72,25 +67,31 @@ struct CABLESIMRUNTIME_API FCableSimEndpointBinding
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	ECableSimEndpointMode Mode = ECableSimEndpointMode::CableLocalKinematic;
+	ECableSimEndpointState State = ECableSimEndpointState::Fixed;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	ECableSimTargetSpace TargetSpace = ECableSimTargetSpace::CableLocal;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	FVector SpawnLocalPosition = FVector::ZeroVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimEndpointMode::CableLocalKinematic"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "TargetSpace == ECableSimTargetSpace::CableLocal"))
 	FVector LocalTarget = FVector::ZeroVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimEndpointMode::WorldKinematic"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "TargetSpace == ECableSimTargetSpace::World"))
 	FVector WorldTarget = FVector::ZeroVector;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimEndpointMode::ComponentKinematic"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "TargetSpace == ECableSimTargetSpace::Component"))
 	TObjectPtr<USceneComponent> TargetComponent = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimEndpointMode::ComponentKinematic"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "TargetSpace == ECableSimTargetSpace::Component"))
 	FName SocketName = NAME_None;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimEndpointMode::ComponentKinematic"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "TargetSpace == ECableSimTargetSpace::Component"))
 	FVector ComponentLocalOffset = FVector::ZeroVector;
+
+	UPROPERTY()
+	ECableSimEndpointMode Mode = ECableSimEndpointMode::CableLocalKinematic;
 };
 
 USTRUCT(BlueprintType)
@@ -98,14 +99,35 @@ struct CABLESIMRUNTIME_API FCableSimSimulationSettings
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.01", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", Units = "cm"))
 	double RestLength = 400.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.01", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2.0", Units = "cm"))
 	double NodeSpacing = 10.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.000001", Units = "kg"))
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Uniform particles replace contact-time refinement"))
+	double ContactRefinementLength = 5.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2", ClampMax = "4096"))
+	int32 MaximumParticles = 512;
+
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use LinearDensity"))
 	double ParticleMass = 0.05;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Material", meta = (ClampMin = "0.000001"))
+	double LinearDensity = 0.5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "1.0", Units = "cm"))
+	double MaximumLength = 3000.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "0.0", Units = "cm/s"))
+	double PayoutSpeed = 100.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "0.0", Units = "cm/s"))
+	double ReelSpeed = 100.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length")
+	ECableSimLengthChangeOrigin LengthChangeOrigin = ECableSimLengthChangeOrigin::End;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	FVector Gravity = FVector(0.0, 0.0, -980.665);
@@ -113,32 +135,42 @@ struct CABLESIMRUNTIME_API FCableSimSimulationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double VelocityDamping = 0.01;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", ClampMax = "1.05"))
-	double DistanceOverRelaxation = 1.015;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
+	double DistanceCompliance = 0.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0", UIMax = "256"))
-	int32 ConstraintIterations = 64;
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use BendStrength and FreeBendDegreesPerMeter"))
+	double BendCompliance = 0.02;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0001", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", ClampMax = "1.1"))
+	double DistanceRelaxation = 1.015;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	double BendStrength = 0.20;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
+	double FreeBendDegreesPerMeter = 90.0;
+
+	/** Maximum speed at which a driven end may chase its requested target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", Units = "cm/s"))
+	double DrivenEndpointMaximumSpeed = 300.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 SolverIterations = 64;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 MultigridIterations = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "8", ClampMax = "4096"))
+	int32 MultigridMinimumParticles = 64;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.001", Units = "s"))
 	double FixedTimeStep = 1.0 / 60.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "16"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 MaximumSubsteps = 4;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	bool bSimulationEnabled = true;
-};
-
-USTRUCT(BlueprintType)
-struct CABLESIMRUNTIME_API FCableSimBendingSettings
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	double StepStiffness = 0.20;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "deg"))
-	double FreeAngleDegreesPerMeter = 90.0;
 };
 
 USTRUCT(BlueprintType)
@@ -150,25 +182,42 @@ struct CABLESIMRUNTIME_API FCableSimCollisionSettings
 	bool bEnableWorldCollision = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.1", Units = "cm"))
-	double Radius = 5.0;
+	double Radius = 2.5;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
-	double SkinWidth = 0.5;
+	double SkinWidth = 0.25;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "4"))
-	int32 MaximumContactsPerParticle = 4;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaximumContactsPerElement = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "3"))
+	int32 MaximumEdgesPerElement = 3;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
 	double ContactReleaseDistance = 1.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "90.0", Units = "deg"))
-	double ContactNormalToleranceDegrees = 15.0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.01", Units = "cm"))
+	double TopologyTolerance = 0.1;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0", ClampMax = "8"))
-	int32 ContactPersistenceSteps = 2;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.1", Units = "cm"))
+	double MaximumSafeCorrection = 5.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	TEnumAsByte<ECollisionChannel> Channel = ECC_WorldStatic;
+	bool bCollideWorldStatic = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bCollideWorldDynamic = true;
+
+	/** Dedicated trace channel used by normal and rope-only collision. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bTraceComplex = false;
+
+	/** Broadphase allowance for moving collision that can cross the cable in one step. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm/s"))
+	double MaximumDynamicColliderSpeed = 2000.0;
 };
 
 USTRUCT(BlueprintType)
@@ -185,72 +234,18 @@ struct CABLESIMRUNTIME_API FCableSimFrictionSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
 	double DynamicFrictionCoefficient = 0.25;
 
+	/** Constant tangential speed removed after each contacting solve step. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm/s"))
-	double StaticSpeedThreshold = 2.0;
-};
-
-USTRUCT(BlueprintType)
-struct CABLESIMRUNTIME_API FCableSimTautSettings
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	bool bEnableTautSolver = false;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	bool bEnableReachConstraint = true;
-
-	/** Endpoint limited by the taut path. The opposite kinematic endpoint is the anchor. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "bEnableReachConstraint"))
-	ECableSimEndpoint ConstrainedEndpoint = ECableSimEndpoint::End;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.001", Units = "cm"))
-	double TopologyTolerance = 0.1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2", ClampMax = "64"))
-	int32 MaximumCollisionPasses = 16;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	double GuideActivationPathRatio = 0.80;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
-	double GuideSlackScale = 0.50;
+	double ConstantVelocityReduction = 5.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
-	double MaximumGuideRadius = 100.0;
+	double StaticDeadZone = 0.05;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	double GuideStepStrength = 0.85;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm/s"))
+	double FadeStartSpeed = 50.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
-	double LengthTolerance = 0.1;
-};
-
-UENUM(BlueprintType, meta = (Bitflags))
-enum class ECableSimDebugDraw : uint8
-{
-	Particles = 0 UMETA(DisplayName = "Particles"),
-	SnapshotBounds = 1 UMETA(DisplayName = "Snapshot bounds"),
-	CandidateTopology = 2 UMETA(DisplayName = "Candidate topology"),
-	ActiveContacts = 3 UMETA(DisplayName = "Active contacts"),
-	Friction = 4 UMETA(DisplayName = "Friction / load"),
-	TautPathAndGuide = 5 UMETA(DisplayName = "Taut path / guide"),
-	StatusAndReach = 6 UMETA(DisplayName = "Status / reach")
-};
-
-USTRUCT(BlueprintType)
-struct CABLESIMRUNTIME_API FCableSimPreviewSettings
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	bool bVisible = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
-	FLinearColor Color = FLinearColor(0.0f, 1.0f, 1.0f);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
-	float LineThickness = 1.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm/s"))
+	double FadeEndSpeed = 150.0;
 };
 
 USTRUCT(BlueprintType)
@@ -261,74 +256,59 @@ struct CABLESIMRUNTIME_API FCableSimDebugSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	bool bDraw = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (Bitmask, BitmaskEnum = "/Script/CableSimRuntime.ECableSimDebugDraw"))
-	int32 DrawFlags = (1 << static_cast<uint8>(ECableSimDebugDraw::Particles))
-		| (1 << static_cast<uint8>(ECableSimDebugDraw::ActiveContacts))
-		| (1 << static_cast<uint8>(ECableSimDebugDraw::TautPathAndGuide))
-		| (1 << static_cast<uint8>(ECableSimDebugDraw::StatusAndReach));
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawParticles = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawContacts = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawCollisionGeometry = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawPredictedBounds = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawRejectedContacts = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawStatus = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	FLinearColor CableColor = FLinearColor(0.0f, 1.0f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
 	float LineThickness = 1.5f;
 };
 
 USTRUCT(BlueprintType)
-struct CABLESIMRUNTIME_API FCableSimTautDiagnostics
+struct CABLESIMRUNTIME_API FCableSimEndpointResult
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	ECableSimTautStatus Status = ECableSimTautStatus::Disabled;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	ECableSimEndpointState State = ECableSimEndpointState::Free;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int64 StepIndex = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	FVector RequestedWorldPosition = FVector::ZeroVector;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 PointCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	FVector AcceptedWorldPosition = FVector::ZeroVector;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 ContactCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	FVector CorrectionWorld = FVector::ZeroVector;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 OverlapCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	FVector Velocity = FVector::ZeroVector;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 PhysicsObjectCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
+	double LimitError = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 ShapeCount = 0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bLimited = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 TriangleCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 ExtractedEdgeCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 ExtractedVertexCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 OverValenceVertexCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	int32 SupportedEdgeCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
-	double PathLength = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "ms"))
-	double SnapshotMilliseconds = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "ms"))
-	double TopologyCompileMilliseconds = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "ms"))
-	double SolverMilliseconds = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	bool bSnapshotSucceeded = false;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	bool bFeatureBudgetExceeded = false;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bBindingValid = true;
 };
 
 USTRUCT(BlueprintType)
@@ -349,40 +329,16 @@ struct CABLESIMRUNTIME_API FCableSimStatus
 	int32 ContactCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 PersistedContactCount = 0;
+	int32 CollisionQueryCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 ContactAdditionCount = 0;
+	int32 CollisionTriangleCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 ContactRemovalCount = 0;
+	int32 ConvexEdgeCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 GuideConstraintCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 ProjectedContactCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	int32 StaticFrictionAnchorCount = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	ECableSimEndpointBindingStatus StartEndpointStatus = ECableSimEndpointBindingStatus::Ready;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	ECableSimEndpointBindingStatus EndEndpointStatus = ECableSimEndpointBindingStatus::Ready;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double RestLength = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double EffectiveSolveLength = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double EndpointDistance = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	double StrainRatio = 0.0;
+	int32 RejectedContactCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double MaximumSegmentError = 0.0;
@@ -390,59 +346,51 @@ struct CABLESIMRUNTIME_API FCableSimStatus
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double MaximumPenetration = 0.0;
 
+	/** Maximum positive (tensile) segment strain. */
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	double MaximumSegmentStrain = 0.0;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double MaximumGuideError = 0.0;
+	double MaximumContactCorrection = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm/s"))
-	double MaximumParticleSpeed = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm/s"))
-	double RmsParticleSpeed = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "N"))
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
 	double MaximumEstimatedTension = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "N"))
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
 	double MaximumEstimatedNormalLoad = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "s"))
-	double DroppedSimulationTime = 0.0;
-};
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	double AcceptedMovementFraction = 1.0;
 
-USTRUCT(BlueprintType)
-struct CABLESIMRUNTIME_API FCableSimEndpointConstraint
-{
-	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "ms"))
+	double SimulationMilliseconds = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	ECableSimEndpointConstraintStatus Status = ECableSimEndpointConstraintStatus::Disabled;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bMotionClamped = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	ECableSimEndpoint Endpoint = ECableSimEndpoint::End;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bCollisionDegraded = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	FVector RequestedWorldPosition = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
+	double ActiveLength = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	FVector ReachableWorldPosition = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
+	double TargetLength = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	FVector CorrectionWorld = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
+	double MaximumLength = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	FVector ConstraintDirection = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	ECableSimLengthChangeOrigin LengthChangeOrigin = ECableSimLengthChangeOrigin::End;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
-	double PathLength = 0.0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bLengthChanging = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
-	double RestLength = 0.0;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bLengthClamped = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
-	double ExcessDistance = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
-	bool bLimited = false;
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bBindingFailure = false;
 };
 
 struct FCableSimRuntimeState;
@@ -455,10 +403,11 @@ class CABLESIMRUNTIME_API UCableSimComponent : public UDebugDrawComponent
 public:
 	UCableSimComponent();
 	virtual ~UCableSimComponent() override;
-
+	virtual void Serialize(FArchive& Ar) override;
+	virtual void PostLoad() override;
 	virtual void OnRegister() override;
 	virtual void BeginPlay() override;
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFunction) override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 
 #if WITH_EDITOR
@@ -475,28 +424,13 @@ public:
 	FCableSimSimulationSettings SimulationSettings;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
-	FCableSimBendingSettings BendingSettings;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
 	FCableSimCollisionSettings CollisionSettings;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
 	FCableSimFrictionSettings FrictionSettings;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
-	FCableSimTautSettings TautSettings;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
-	FCableSimPreviewSettings PreviewSettings;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Settings")
 	FCableSimDebugSettings DebugSettings;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Category = "Cable|Taut")
-	FCableSimEndpointConstraint StartEndpointConstraint;
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Category = "Cable|Taut")
-	FCableSimEndpointConstraint EndEndpointConstraint;
 
 	UFUNCTION(BlueprintCallable, Category = "Cable|Simulation")
 	void ReinitializeSimulation();
@@ -504,77 +438,61 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Cable|Simulation")
 	void StepSimulation(int32 StepCount = 1);
 
-	UFUNCTION(BlueprintCallable, Category = "Cable|Simulation")
-	void SetRestLength(double NewRestLength);
+	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
+	void SetEndpointState(ECableSimEndpoint Endpoint, ECableSimEndpointState State);
 
 	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
-	void SetEndpointMode(ECableSimEndpoint Endpoint, ECableSimEndpointMode Mode);
+	void SetDrivenEndpointTarget(ECableSimEndpoint Endpoint, FVector WorldPosition, FVector WorldVelocity = FVector::ZeroVector);
 
 	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
-	void SetEndpointWorldTarget(ECableSimEndpoint Endpoint, FVector WorldPosition);
+	void AttachEndpointToComponent(ECableSimEndpoint Endpoint, USceneComponent* Component, FName SocketName = NAME_None, FVector LocalOffset = FVector::ZeroVector);
 
 	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
-	void SetEndpointLocalTarget(ECableSimEndpoint Endpoint, FVector LocalPosition);
-
-	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
-	void AttachEndpointToComponent(
-		ECableSimEndpoint Endpoint,
-		USceneComponent* TargetComponent,
-		FName SocketName = NAME_None,
-		FVector LocalOffset = FVector::ZeroVector);
+	void DriveEndpointFromComponent(ECableSimEndpoint Endpoint, USceneComponent* Component, FName SocketName = NAME_None, FVector LocalOffset = FVector::ZeroVector);
 
 	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
 	void ReleaseEndpoint(ECableSimEndpoint Endpoint, bool bPreserveVelocity = true);
 
-	UFUNCTION(BlueprintCallable, Category = "Cable|Endpoints")
-	void TeleportEndpoint(ECableSimEndpoint Endpoint, FVector WorldPosition, bool bResetVelocity = true);
-
-	UFUNCTION(BlueprintCallable, Category = "Cable|Simulation")
-	void ResetSimulation();
+	UFUNCTION(BlueprintPure, Category = "Cable|Endpoints")
+	FCableSimEndpointResult GetEndpointResult(ECableSimEndpoint Endpoint) const;
 
 	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
-	TArray<FVector> GetSimulationPolyline() const;
-
-	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
-	TArray<FVector> GetRenderPolyline() const;
+	TArray<FVector> GetCablePolyline() const;
 
 	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
 	FCableSimStatus GetSimulationStatus() const;
 
-	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
-	int64 GetSimulationStepIndex() const;
+	UFUNCTION(BlueprintCallable, Category = "Cable|Length")
+	double SetTargetCableLength(double NewLength, ECableSimLengthChangeOrigin Origin);
 
-	UFUNCTION(BlueprintPure, Category = "Cable|Taut")
-	TArray<FVector> GetTautPolyline() const;
+	UFUNCTION(BlueprintCallable, Category = "Cable|Length")
+	void StopLengthChange();
 
-	UFUNCTION(BlueprintPure, Category = "Cable|Taut")
-	FCableSimTautDiagnostics GetTautDiagnostics() const;
+	UFUNCTION(BlueprintPure, Category = "Cable|Length")
+	double GetActiveCableLength() const;
 
-	UFUNCTION(BlueprintPure, Category = "Cable|Taut")
-	FCableSimEndpointConstraint GetEndpointConstraint(ECableSimEndpoint Endpoint) const;
+	UFUNCTION(BlueprintPure, Category = "Cable|Length")
+	double GetTargetCableLength() const;
+
+	UFUNCTION(BlueprintPure, Category = "Cable|Length")
+	bool IsLengthChanging() const;
+
+	/** Writes the complete current solver/collision frame to Saved/CableSimDumps. */
+	UFUNCTION(BlueprintCallable, Category = "Cable|Debug")
+	FString WriteDebugFrameDump() const;
 
 private:
 	virtual FDebugRenderSceneProxy* CreateDebugSceneProxy() override;
-	FCableSimEndpointBinding& GetBinding(ECableSimEndpoint Endpoint);
-	const FCableSimEndpointBinding& GetBinding(ECableSimEndpoint Endpoint) const;
-	CableSim::FSimulationConfig BuildCoreConfig() const;
-	FVector3d ResolveInitialPosition(const FCableSimEndpointBinding& Binding, ECableSimEndpoint Endpoint) const;
-	FVector3d ResolveTargetPosition(ECableSimEndpoint Endpoint) const;
-	bool TryResolveTargetPosition(
-		ECableSimEndpoint Endpoint,
-		FVector3d& OutPosition,
-		ECableSimEndpointBindingStatus& OutStatus) const;
-	void SynchronizeConfiguration();
-	void SynchronizeEndpointModes();
-	void SampleEndpointTargets(double DeltaTime);
-	CableSim::FStepInput BuildStepInput(double InterpolationAlpha) const;
-	void CommitEndpointSamples();
-	void PerformFixedStep(double InterpolationAlpha);
-	void PerformTautStep(CableSim::FStepInput& Input, TConstArrayView<AActor*> IgnoredActors);
-	void BuildTautGuideConstraints(CableSim::FStepInput& Input) const;
+	FCableSimEndpointBinding& Binding(ECableSimEndpoint Endpoint);
+	const FCableSimEndpointBinding& Binding(ECableSimEndpoint Endpoint) const;
+	void MigrateLegacyBindings();
 	void RefreshEditorPreview();
 	void RefreshVisualization();
+	void PerformFixedStep(double FrameAlpha);
+	bool ResolveEndpointTarget(const FCableSimEndpointBinding& Endpoint, int32 EndpointIndex, FVector3d& OutTarget);
 
-	CableSim::FSolver Solver;
 	FCableSimRuntimeState* RuntimeState = nullptr;
+
+	UPROPERTY()
+	int32 MaterialSettingsVersion = 0;
 };

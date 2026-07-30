@@ -15,7 +15,6 @@ namespace CableSim
 			int32 ShapeIndex = INDEX_NONE;
 			int32 Vertex0 = INDEX_NONE;
 			int32 Vertex1 = INDEX_NONE;
-
 			bool operator==(const FEdgeKey& Other) const = default;
 		};
 
@@ -29,8 +28,8 @@ namespace CableSim
 
 		struct FIncidentFace
 		{
-			int32 TriangleArrayIndex = INDEX_NONE;
-			int32 OppositeVertex = INDEX_NONE;
+			int32 Triangle = INDEX_NONE;
+			int32 OppositeCorner = INDEX_NONE;
 		};
 
 		struct FPendingEdge
@@ -40,42 +39,6 @@ namespace CableSim
 		};
 	}
 
-	bool FCollisionFeatureId::IsValid() const
-	{
-		return ObjectToken != 0 && ShapeIndex != INDEX_NONE && Type != ECollisionFeatureType::None
-			&& Index0 != INDEX_NONE;
-	}
-
-	uint32 GetTypeHash(const FCollisionFeatureId& FeatureId)
-	{
-		uint32 Hash = ::GetTypeHash(FeatureId.ObjectToken);
-		Hash = HashCombineFast(Hash, ::GetTypeHash(FeatureId.ShapeIndex));
-		Hash = HashCombineFast(Hash, ::GetTypeHash(static_cast<uint8>(FeatureId.Type)));
-		Hash = HashCombineFast(Hash, ::GetTypeHash(FeatureId.Index0));
-		return HashCombineFast(Hash, ::GetTypeHash(FeatureId.Index1));
-	}
-
-	bool FCollisionFeatureId::Less(
-		const FCollisionFeatureId& First,
-		const FCollisionFeatureId& Second)
-	{
-		if (First.ObjectToken != Second.ObjectToken)
-		{
-			return First.ObjectToken < Second.ObjectToken;
-		}
-		if (First.ShapeIndex != Second.ShapeIndex)
-		{
-			return First.ShapeIndex < Second.ShapeIndex;
-		}
-		if (First.Type != Second.Type)
-		{
-			return static_cast<uint8>(First.Type) < static_cast<uint8>(Second.Type);
-		}
-		return First.Index0 != Second.Index0
-			? First.Index0 < Second.Index0
-			: First.Index1 < Second.Index1;
-	}
-
 	FVector3d FCollisionTriangle::CalculateNormal() const
 	{
 		return FVector3d::CrossProduct(Vertices[1] - Vertices[0], Vertices[2] - Vertices[0]).GetSafeNormal();
@@ -83,214 +46,111 @@ namespace CableSim
 
 	bool FCollisionTriangle::IsFinite() const
 	{
-		return IsFiniteVector(Vertices[0]) && IsFiniteVector(Vertices[1]) && IsFiniteVector(Vertices[2]);
+		return Id.IsValid() && IsFiniteVector(Vertices[0]) && IsFiniteVector(Vertices[1]) && IsFiniteVector(Vertices[2]);
 	}
 
-	bool FCollisionEdge::IsFinite() const
-	{
-		return Id.IsValid() && IsFiniteVector(Start) && IsFiniteVector(End)
-			&& IsFiniteVector(FaceNormal0) && IsFiniteVector(FaceNormal1);
-	}
-
-	bool FCollisionVertex::IsFinite() const
-	{
-		return Id.IsValid() && IsFiniteVector(Position);
-	}
-
-	FTopologyCompileDiagnostics FCollisionTopologyCompiler::CompileEdges(
+	FTopologyDiagnostics FCollisionTopologyCompiler::CompileEdges(
 		const TConstArrayView<FCollisionTriangle> Triangles,
 		const double Tolerance,
 		TArray<FCollisionEdge>& OutEdges)
 	{
 		OutEdges.Reset();
-		FTopologyCompileDiagnostics Diagnostics;
-		Diagnostics.InputTriangleCount = Triangles.Num();
+		FTopologyDiagnostics Diagnostics;
 		const double SafeTolerance = FMath::Max(Tolerance, 1.e-9);
-
-		TMap<FEdgeKey, FPendingEdge> PendingEdges;
-		PendingEdges.Reserve(Triangles.Num() * 3);
-		for (int32 TriangleArrayIndex = 0; TriangleArrayIndex < Triangles.Num(); ++TriangleArrayIndex)
+		TMap<FEdgeKey, FPendingEdge> Pending;
+		for (int32 TriangleIndex = 0; TriangleIndex < Triangles.Num(); ++TriangleIndex)
 		{
-			const FCollisionTriangle& Triangle = Triangles[TriangleArrayIndex];
+			const FCollisionTriangle& Triangle = Triangles[TriangleIndex];
 			if (!Triangle.IsFinite() || Triangle.CalculateNormal().IsNearlyZero())
 			{
-				Diagnostics.DegenerateEdgeCount += 3;
+				Diagnostics.DegenerateEdges += 3;
 				continue;
 			}
 			for (int32 Side = 0; Side < 3; ++Side)
 			{
-				const int32 FirstCorner = Side;
-				const int32 SecondCorner = (Side + 1) % 3;
-				const int32 OppositeCorner = (Side + 2) % 3;
-				const int32 FirstVertex = Triangle.VertexIndices[FirstCorner];
-				const int32 SecondVertex = Triangle.VertexIndices[SecondCorner];
-				if (FirstVertex == INDEX_NONE || SecondVertex == INDEX_NONE || FirstVertex == SecondVertex
-					|| FVector3d::Distance(Triangle.Vertices[FirstCorner], Triangle.Vertices[SecondCorner]) <= SafeTolerance)
+				const int32 First = Side;
+				const int32 Second = (Side + 1) % 3;
+				const int32 Opposite = (Side + 2) % 3;
+				const int32 V0 = Triangle.VertexIndices[First];
+				const int32 V1 = Triangle.VertexIndices[Second];
+				if (V0 == INDEX_NONE || V1 == INDEX_NONE || V0 == V1
+					|| FVector3d::Distance(Triangle.Vertices[First], Triangle.Vertices[Second]) <= SafeTolerance)
 				{
-					++Diagnostics.DegenerateEdgeCount;
+					++Diagnostics.DegenerateEdges;
 					continue;
 				}
-
-				FEdgeKey Key;
-				Key.ObjectToken = Triangle.Id.ObjectToken;
-				Key.ShapeIndex = Triangle.Id.ShapeIndex;
-				Key.Vertex0 = FMath::Min(FirstVertex, SecondVertex);
-				Key.Vertex1 = FMath::Max(FirstVertex, SecondVertex);
-				FPendingEdge& Pending = PendingEdges.FindOrAdd(Key);
-				Pending.Key = Key;
-				Pending.Faces.Add({TriangleArrayIndex, OppositeCorner});
+				FEdgeKey Key{Triangle.Id.ObjectToken, Triangle.Id.ShapeIndex, FMath::Min(V0, V1), FMath::Max(V0, V1)};
+				FPendingEdge& Edge = Pending.FindOrAdd(Key);
+				Edge.Key = Key;
+				Edge.Faces.Add({TriangleIndex, Opposite});
 			}
 		}
 
-		TArray<FPendingEdge> OrderedEdges;
-		PendingEdges.GenerateValueArray(OrderedEdges);
-		OrderedEdges.Sort([](const FPendingEdge& First, const FPendingEdge& Second)
+		TArray<FPendingEdge> Ordered;
+		Pending.GenerateValueArray(Ordered);
+		Ordered.Sort([](const FPendingEdge& A, const FPendingEdge& B)
 		{
-			const FCollisionFeatureId FirstId{
-				First.Key.ObjectToken,
-				First.Key.ShapeIndex,
-				ECollisionFeatureType::Edge,
-				First.Key.Vertex0,
-				First.Key.Vertex1};
-			const FCollisionFeatureId SecondId{
-				Second.Key.ObjectToken,
-				Second.Key.ShapeIndex,
-				ECollisionFeatureType::Edge,
-				Second.Key.Vertex0,
-				Second.Key.Vertex1};
-			return FCollisionFeatureId::Less(FirstId, SecondId);
+			return FCollisionFeatureId::Less(
+				{A.Key.ObjectToken, A.Key.ShapeIndex, ECollisionFeatureType::Edge, A.Key.Vertex0, A.Key.Vertex1},
+				{B.Key.ObjectToken, B.Key.ShapeIndex, ECollisionFeatureType::Edge, B.Key.Vertex0, B.Key.Vertex1});
 		});
 
-		for (FPendingEdge& Pending : OrderedEdges)
+		for (const FPendingEdge& PendingEdge : Ordered)
 		{
-			Pending.Faces.Sort([&Triangles](const FIncidentFace& First, const FIncidentFace& Second)
-			{
-				return FCollisionFeatureId::Less(
-					Triangles[First.TriangleArrayIndex].Id,
-					Triangles[Second.TriangleArrayIndex].Id);
-			});
-			const FIncidentFace& FirstFace = Pending.Faces[0];
-			const FCollisionTriangle& FirstTriangle = Triangles[FirstFace.TriangleArrayIndex];
-			int32 FirstCorner = INDEX_NONE;
-			int32 SecondCorner = INDEX_NONE;
+			const FCollisionTriangle& FirstTriangle = Triangles[PendingEdge.Faces[0].Triangle];
+			int32 Corner0 = INDEX_NONE;
+			int32 Corner1 = INDEX_NONE;
 			for (int32 Corner = 0; Corner < 3; ++Corner)
 			{
-				if (FirstTriangle.VertexIndices[Corner] == Pending.Key.Vertex0)
-				{
-					FirstCorner = Corner;
-				}
-				else if (FirstTriangle.VertexIndices[Corner] == Pending.Key.Vertex1)
-				{
-					SecondCorner = Corner;
-				}
+				if (FirstTriangle.VertexIndices[Corner] == PendingEdge.Key.Vertex0) Corner0 = Corner;
+				if (FirstTriangle.VertexIndices[Corner] == PendingEdge.Key.Vertex1) Corner1 = Corner;
 			}
-			if (FirstCorner == INDEX_NONE || SecondCorner == INDEX_NONE)
-			{
-				++Diagnostics.DegenerateEdgeCount;
-				continue;
-			}
-
+			if (Corner0 == INDEX_NONE || Corner1 == INDEX_NONE) { ++Diagnostics.DegenerateEdges; continue; }
 			FCollisionEdge Edge;
-			Edge.Id = {
-				Pending.Key.ObjectToken,
-				Pending.Key.ShapeIndex,
-				ECollisionFeatureType::Edge,
-				Pending.Key.Vertex0,
-				Pending.Key.Vertex1};
-			Edge.Start = FirstTriangle.Vertices[FirstCorner];
-			Edge.End = FirstTriangle.Vertices[SecondCorner];
+			Edge.Id = {PendingEdge.Key.ObjectToken, PendingEdge.Key.ShapeIndex, ECollisionFeatureType::Edge,
+				PendingEdge.Key.Vertex0, PendingEdge.Key.Vertex1};
 			Edge.GeometryType = FirstTriangle.GeometryType;
-			Edge.bStaticObject = FirstTriangle.bStaticObject;
+			Edge.Start = FirstTriangle.Vertices[Corner0];
+			Edge.End = FirstTriangle.Vertices[Corner1];
 			Edge.FaceNormal0 = FirstTriangle.CalculateNormal();
-
-			if (Pending.Faces.Num() == 1)
+			if (PendingEdge.Faces.Num() == 1)
 			{
 				Edge.Kind = ECollisionEdgeKind::Boundary;
-				++Diagnostics.BoundaryEdgeCount;
+				++Diagnostics.BoundaryEdges;
 			}
-			else if (Pending.Faces.Num() > 2)
+			else if (PendingEdge.Faces.Num() > 2)
 			{
 				Edge.Kind = ECollisionEdgeKind::NonManifold;
-				++Diagnostics.NonManifoldEdgeCount;
+				++Diagnostics.NonManifoldEdges;
 			}
 			else
 			{
-				const FIncidentFace& SecondFace = Pending.Faces[1];
-				const FCollisionTriangle& SecondTriangle = Triangles[SecondFace.TriangleArrayIndex];
+				const FIncidentFace& SecondFace = PendingEdge.Faces[1];
+				const FCollisionTriangle& SecondTriangle = Triangles[SecondFace.Triangle];
 				Edge.FaceNormal1 = SecondTriangle.CalculateNormal();
 				const double SecondBehindFirst = FVector3d::DotProduct(
-					Edge.FaceNormal0,
-					SecondTriangle.Vertices[SecondFace.OppositeVertex] - Edge.Start);
+					Edge.FaceNormal0, SecondTriangle.Vertices[SecondFace.OppositeCorner] - Edge.Start);
+				const FIncidentFace& FirstFace = PendingEdge.Faces[0];
 				const double FirstBehindSecond = FVector3d::DotProduct(
-					Edge.FaceNormal1,
-					FirstTriangle.Vertices[FirstFace.OppositeVertex] - Edge.Start);
-				if (FMath::Abs(SecondBehindFirst) <= SafeTolerance
-					&& FMath::Abs(FirstBehindSecond) <= SafeTolerance)
+					Edge.FaceNormal1, FirstTriangle.Vertices[FirstFace.OppositeCorner] - Edge.Start);
+				if (FMath::Abs(SecondBehindFirst) <= SafeTolerance && FMath::Abs(FirstBehindSecond) <= SafeTolerance)
 				{
 					Edge.Kind = ECollisionEdgeKind::Coplanar;
-					++Diagnostics.CoplanarEdgeCount;
+					++Diagnostics.CoplanarEdges;
 				}
 				else if (SecondBehindFirst < -SafeTolerance && FirstBehindSecond < -SafeTolerance)
 				{
 					Edge.Kind = ECollisionEdgeKind::Convex;
-					++Diagnostics.ConvexEdgeCount;
+					++Diagnostics.ConvexEdges;
 				}
 				else
 				{
 					Edge.Kind = ECollisionEdgeKind::Concave;
-					++Diagnostics.ConcaveEdgeCount;
+					++Diagnostics.ConcaveEdges;
 				}
 			}
 			OutEdges.Add(MoveTemp(Edge));
 		}
-		return Diagnostics;
-	}
-
-	FTopologyCompileDiagnostics FCollisionTopologyCompiler::CompileTopology(
-		const TConstArrayView<FCollisionTriangle> Triangles,
-		const double Tolerance,
-		const int32 MaximumIncidentEdges,
-		TArray<FCollisionEdge>& OutEdges,
-		TArray<FCollisionVertex>& OutVertices)
-	{
-		FTopologyCompileDiagnostics Diagnostics = CompileEdges(Triangles, Tolerance, OutEdges);
-		OutVertices.Reset();
-		const int32 SafeMaximumIncidentEdges = FMath::Clamp(MaximumIncidentEdges, 1, 8);
-		TMap<FCollisionFeatureId, FCollisionVertex> Vertices;
-		for (const FCollisionEdge& Edge : OutEdges)
-		{
-			for (const bool bStart : {true, false})
-			{
-				FCollisionFeatureId VertexId{
-					Edge.Id.ObjectToken,
-					Edge.Id.ShapeIndex,
-					ECollisionFeatureType::Vertex,
-					bStart ? Edge.Id.Index0 : Edge.Id.Index1,
-					INDEX_NONE};
-				FCollisionVertex& Vertex = Vertices.FindOrAdd(VertexId);
-				Vertex.Id = VertexId;
-				Vertex.GeometryType = Edge.GeometryType;
-				Vertex.bStaticObject = Edge.bStaticObject;
-				Vertex.Position = bStart ? Edge.Start : Edge.End;
-				Vertex.IncidentEdges.Add(Edge.Id);
-				Vertex.bNonManifold |= Edge.Kind == ECollisionEdgeKind::NonManifold;
-			}
-		}
-		Vertices.GenerateValueArray(OutVertices);
-		OutVertices.Sort([](const FCollisionVertex& First, const FCollisionVertex& Second)
-		{
-			return FCollisionFeatureId::Less(First.Id, Second.Id);
-		});
-		for (FCollisionVertex& Vertex : OutVertices)
-		{
-			Vertex.IncidentEdges.Sort([](const FCollisionFeatureId& First, const FCollisionFeatureId& Second)
-			{
-				return FCollisionFeatureId::Less(First, Second);
-			});
-			Vertex.bOverValence = Vertex.IncidentEdges.Num() > SafeMaximumIncidentEdges;
-			Diagnostics.OverValenceVertexCount += Vertex.bOverValence ? 1 : 0;
-		}
-		Diagnostics.VertexCount = OutVertices.Num();
 		return Diagnostics;
 	}
 }

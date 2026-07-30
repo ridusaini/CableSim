@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 2,
-	"VersionName": "0.2.0",
+	"Version": 3,
+	"VersionName": "0.3.0",
 	"FriendlyName": "Cable Sim",
-	"Description": "Deterministic position-based cable simulation.",
+	"Description": "Modular dynamic XPBD cable simulation with segment-level world collision.",
 	"Category": "Physics",
 	"CreatedBy": "CableSim",
 	"CanContainContent": true,

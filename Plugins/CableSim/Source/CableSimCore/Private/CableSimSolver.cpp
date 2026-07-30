@@ -4,14 +4,16 @@ namespace CableSim
 {
 	namespace
 	{
-		constexpr double MinimumLength = 0.01;
-		constexpr double MinimumMass = 1.e-9;
-		constexpr double FeasibilityTolerance = 0.1;
-		constexpr int32 MaximumSegmentCount = 4095;
+		constexpr double SmallNumber = 1.e-9;
+
+		bool NearlyEqual(const double A, const double B, const double Tolerance)
+		{
+			return FMath::Abs(A - B) <= Tolerance;
+		}
 
 		FVector3d RemoveNormalComponents(
 			const FVector3d& Value,
-			TConstArrayView<FVector3d> OrthonormalNormals)
+			const TConstArrayView<FVector3d> OrthonormalNormals)
 		{
 			FVector3d Result = Value;
 			for (const FVector3d& Normal : OrthonormalNormals)
@@ -21,73 +23,118 @@ namespace CableSim
 			return Result;
 		}
 
-		void AddOrthonormalNormal(const FVector3d& Candidate, TArray<FVector3d, TInlineAllocator<3>>& Normals)
+		void AddOrthonormalNormal(
+			const FVector3d& Candidate,
+			TArray<FVector3d, TInlineAllocator<3>>& Normals)
 		{
-			FVector3d Orthogonal = RemoveNormalComponents(Candidate, Normals);
+			FVector3d Orthogonal = RemoveNormalComponents(Candidate.GetSafeNormal(), Normals);
 			if (Orthogonal.Normalize())
 			{
 				Normals.Add(Orthogonal);
 			}
 		}
+
+		FVector3d SamplePoint(const TArray<FParticle>& Particles, const FContactConstraint& Contact, const bool bPrevious)
+		{
+			const double Alpha = Particles.IsValidIndex(Contact.ParticleB)
+				? FMath::Clamp(Contact.SegmentAlpha, 0.0, 1.0)
+				: 0.0;
+			const FVector3d A = bPrevious
+				? Particles[Contact.ParticleA].PreviousPosition
+				: Particles[Contact.ParticleA].Position;
+			if (!Particles.IsValidIndex(Contact.ParticleB))
+			{
+				return A;
+			}
+			const FVector3d B = bPrevious
+				? Particles[Contact.ParticleB].PreviousPosition
+				: Particles[Contact.ParticleB].Position;
+			return FMath::Lerp(A, B, Alpha);
+		}
+	}
+
+	bool FCollisionFeatureId::IsValid() const
+	{
+		return ObjectToken != 0 && ShapeIndex != INDEX_NONE
+			&& Type != ECollisionFeatureType::None && Index0 != INDEX_NONE;
+	}
+
+	bool FCollisionFeatureId::Less(const FCollisionFeatureId& A, const FCollisionFeatureId& B)
+	{
+		if (A.ObjectToken != B.ObjectToken) return A.ObjectToken < B.ObjectToken;
+		if (A.ShapeIndex != B.ShapeIndex) return A.ShapeIndex < B.ShapeIndex;
+		if (A.Type != B.Type) return static_cast<uint8>(A.Type) < static_cast<uint8>(B.Type);
+		return A.Index0 != B.Index0 ? A.Index0 < B.Index0 : A.Index1 < B.Index1;
+	}
+
+	uint32 GetTypeHash(const FCollisionFeatureId& Id)
+	{
+		uint32 Hash = ::GetTypeHash(Id.ObjectToken);
+		Hash = HashCombineFast(Hash, ::GetTypeHash(Id.ShapeIndex));
+		Hash = HashCombineFast(Hash, ::GetTypeHash(static_cast<uint8>(Id.Type)));
+		Hash = HashCombineFast(Hash, ::GetTypeHash(Id.Index0));
+		return HashCombineFast(Hash, ::GetTypeHash(Id.Index1));
 	}
 
 	bool FSimulationConfig::Equals(const FSimulationConfig& Other, const double Tolerance) const
 	{
-		return FMath::IsNearlyEqual(RestLength, Other.RestLength, Tolerance)
-			&& FMath::IsNearlyEqual(NodeSpacing, Other.NodeSpacing, Tolerance)
-			&& FMath::IsNearlyEqual(ParticleMass, Other.ParticleMass, Tolerance)
+		return NearlyEqual(Length, Other.Length, Tolerance)
+			&& NearlyEqual(SegmentLength, Other.SegmentLength, Tolerance)
+			&& MaximumParticles == Other.MaximumParticles
+			&& NearlyEqual(LinearDensity, Other.LinearDensity, Tolerance)
 			&& Gravity.Equals(Other.Gravity, Tolerance)
-			&& FMath::IsNearlyEqual(VelocityDamping, Other.VelocityDamping, Tolerance)
-			&& FMath::IsNearlyEqual(BendingStepStrength, Other.BendingStepStrength, Tolerance)
-			&& FMath::IsNearlyEqual(FreeBendAngleRadiansPerMeter, Other.FreeBendAngleRadiansPerMeter, Tolerance)
-			&& FMath::IsNearlyEqual(DistanceOverRelaxation, Other.DistanceOverRelaxation, Tolerance)
-			&& ConstraintIterations == Other.ConstraintIterations
-			&& bEnableFriction == Other.bEnableFriction
-			&& FMath::IsNearlyEqual(StaticFrictionCoefficient, Other.StaticFrictionCoefficient, Tolerance)
-			&& FMath::IsNearlyEqual(DynamicFrictionCoefficient, Other.DynamicFrictionCoefficient, Tolerance)
-			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance);
+			&& NearlyEqual(VelocityDamping, Other.VelocityDamping, Tolerance)
+			&& NearlyEqual(DistanceCompliance, Other.DistanceCompliance, Tolerance)
+			&& NearlyEqual(DistanceRelaxation, Other.DistanceRelaxation, Tolerance)
+			&& NearlyEqual(BendStrength, Other.BendStrength, Tolerance)
+			&& NearlyEqual(FreeBendDegreesPerMeter, Other.FreeBendDegreesPerMeter, Tolerance)
+			&& NearlyEqual(DrivenEndpointMaximumSpeed, Other.DrivenEndpointMaximumSpeed, Tolerance)
+			&& SolverIterations == Other.SolverIterations
+			&& MultigridIterations == Other.MultigridIterations
+			&& MultigridMinimumParticles == Other.MultigridMinimumParticles
+			&& NearlyEqual(StaticFriction, Other.StaticFriction, Tolerance)
+			&& NearlyEqual(DynamicFriction, Other.DynamicFriction, Tolerance)
+			&& NearlyEqual(ConstantFrictionSpeedReduction, Other.ConstantFrictionSpeedReduction, Tolerance)
+			&& NearlyEqual(StaticFrictionDeadZone, Other.StaticFrictionDeadZone, Tolerance)
+			&& NearlyEqual(FrictionFadeStartSpeed, Other.FrictionFadeStartSpeed, Tolerance)
+			&& NearlyEqual(FrictionFadeEndSpeed, Other.FrictionFadeEndSpeed, Tolerance)
+			&& NearlyEqual(MaximumContactCorrection, Other.MaximumContactCorrection, Tolerance);
 	}
 
-	bool FSolver::Initialize(
-		const FVector3d& StartPosition,
-		const FVector3d& EndPosition,
-		const FSimulationConfig& InConfig)
+	bool FSolver::Initialize(const FVector3d& Start, const FVector3d& End, const FSimulationConfig& InConfig)
 	{
 		Reset();
-		if (!IsFinite(StartPosition) || !IsFinite(EndPosition) || !IsValidConfig(InConfig))
+		if (!IsFinite(Start) || !IsFinite(End) || !IsValidConfig(InConfig))
 		{
-			LastStepResult.Status = ESimulationStatus::InvalidConfiguration;
+			LastResult.Status = ESimulationStatus::InvalidConfiguration;
 			return false;
 		}
-
-		Config = SanitizeConfig(InConfig);
-		const int32 SegmentCount = FMath::Clamp(
-			FMath::CeilToInt(Config.RestLength / Config.NodeSpacing),
-			1,
-			MaximumSegmentCount);
-		RestSegmentLength = Config.RestLength / static_cast<double>(SegmentCount);
-		EffectiveSolveLength = Config.RestLength;
-		SolveSegmentLength = RestSegmentLength;
+		Config = InConfig;
+		const int32 SegmentCount = FMath::Max(FMath::CeilToInt(Config.Length / Config.SegmentLength), 1);
+		if (SegmentCount + 1 > Config.MaximumParticles)
+		{
+			LastResult.Status = ESimulationStatus::ParticleBudgetExceeded;
+			return false;
+		}
 		Particles.SetNum(SegmentCount + 1);
-
 		for (int32 Index = 0; Index <= SegmentCount; ++Index)
 		{
-			const double Alpha = static_cast<double>(Index) / static_cast<double>(SegmentCount);
+			const double Alpha = static_cast<double>(Index) / SegmentCount;
 			FParticle& Particle = Particles[Index];
-			Particle.Position = FMath::Lerp(StartPosition, EndPosition, Alpha);
+			// Match the original production-facing behavior: all material exists
+			// immediately, but its initial world shape is the endpoint chord.
+			Particle.Position = FMath::Lerp(Start, End, Alpha);
 			Particle.PreviousPosition = Particle.Position;
-			Particle.KinematicTarget = Particle.Position;
 			Particle.Velocity = FVector3d::ZeroVector;
-			Particle.InverseMass = 1.0 / Config.ParticleMass;
-			Particle.MaterialCoordinate = Alpha * Config.RestLength;
-			Particle.Mode = EParticleMode::Dynamic;
+			Particle.MaterialCoordinate = Alpha * Config.Length;
+			Particle.EstimatedTension = 0.0;
+			Particle.EstimatedNormalLoad = 0.0;
 		}
-
-		LastStepResult.Status = ESimulationStatus::Ready;
-		LastStepResult.ParticleCount = Particles.Num();
-		LastStepResult.RestLength = Config.RestLength;
-		LastStepResult.EffectiveSolveLength = EffectiveSolveLength;
-		bSuspendedAfterFailure = false;
+		RecalculateParticleMasses();
+		DistanceLambdas.Init(0.0, SegmentCount);
+		LastResult.Status = ESimulationStatus::Ready;
+		LastResult.ParticleCount = Particles.Num();
+		LastValidState = CaptureState();
 		return true;
 	}
 
@@ -95,291 +142,453 @@ namespace CableSim
 	{
 		Particles.Reset();
 		Config = FSimulationConfig{};
-		LastStepResult = FStepResult{};
-		LastReplayFrame = FReplayFrame{};
-		LastContactDiagnostics.Reset();
-		ProjectedContacts.Reset();
-		ContactNormalCorrections.Reset();
-		ParticleStaticFrictionCorrections.Reset();
-		ParticleDynamicFrictionVelocityChanges.Reset();
-		RestSegmentLength = 0.0;
-		EffectiveSolveLength = 0.0;
-		SolveSegmentLength = 0.0;
+		LastResult = FStepResult{};
+		LastValidState = FStateSnapshot{};
+		DistanceLambdas.Reset();
+		ParticleFrictionCorrections.Reset();
 		StepIndex = 0;
-		bSuspendedAfterFailure = false;
+		bStepActive = false;
 	}
 
 	bool FSolver::ApplyConfig(const FSimulationConfig& InConfig)
 	{
-		if (!IsInitialized() || !IsValidConfig(InConfig))
+		if (!IsValidConfig(InConfig)) return false;
+		if (IsInitialized() && InConfig.MaximumParticles < Particles.Num())
 		{
-			LastStepResult.Status = ESimulationStatus::InvalidConfiguration;
 			return false;
 		}
-
-		const FSimulationConfig NewConfig = SanitizeConfig(InConfig);
-		const bool bRequiresRemesh =
-			!FMath::IsNearlyEqual(NewConfig.RestLength, Config.RestLength)
-			|| !FMath::IsNearlyEqual(NewConfig.NodeSpacing, Config.NodeSpacing);
-		if (bRequiresRemesh && !RemeshPreservingState(NewConfig))
+		if (IsInitialized() && !NearlyEqual(Config.SegmentLength, InConfig.SegmentLength, 1.e-9)
+			&& !RemeshPreservingState(InConfig.SegmentLength, InConfig.MaximumParticles))
 		{
-			LastStepResult.Status = ESimulationStatus::InvalidConfiguration;
 			return false;
 		}
-
-		Config = NewConfig;
-		const double InverseMass = 1.0 / Config.ParticleMass;
-		for (FParticle& Particle : Particles)
-		{
-			Particle.InverseMass = InverseMass;
-		}
-		RestSegmentLength = Config.RestLength / static_cast<double>(Particles.Num() - 1);
-		EffectiveSolveLength = FMath::Max(EffectiveSolveLength, Config.RestLength);
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
-		bSuspendedAfterFailure = false;
+		const double ActiveLength = GetActiveLength();
+		Config = InConfig;
+		if (IsInitialized()) Config.Length = ActiveLength;
+		RecalculateParticleMasses();
 		return true;
 	}
 
-	FStepResult FSolver::AdvanceStep(const FStepInput& Input, const FContactGenerator& ContactGenerator)
+	double FSolver::GetActiveLength() const
 	{
-		if (!IsInitialized())
-		{
-			LastStepResult.Status = ESimulationStatus::Uninitialized;
-			return LastStepResult;
-		}
-		if (bSuspendedAfterFailure)
-		{
-			LastStepResult.Status = ESimulationStatus::NumericalFailure;
-			return LastStepResult;
-		}
-		if (!FMath::IsFinite(Input.DeltaTime) || Input.DeltaTime <= 0.0
-			|| !IsFinite(Input.StartEndpoint.TargetPosition)
-			|| !IsFinite(Input.EndEndpoint.TargetPosition)
-			|| !IsFinite(Input.StartEndpoint.TargetVelocity)
-			|| !IsFinite(Input.EndEndpoint.TargetVelocity))
-		{
-			LastStepResult.Status = ESimulationStatus::InvalidConfiguration;
-			return LastStepResult;
-		}
+		return Particles.Num() >= 2
+			? Particles.Last().MaterialCoordinate - Particles[0].MaterialCoordinate
+			: 0.0;
+	}
 
-		const FStateSnapshot LastValidState = CaptureState();
-		ApplyEndpointInput(EEndpoint::Start, Input.StartEndpoint);
-		ApplyEndpointInput(EEndpoint::End, Input.EndEndpoint);
+	FParticle FSolver::InterpolateParticle(const FParticle& A, const FParticle& B, const double Alpha)
+	{
+		FParticle Result;
+		Result.Position = FMath::Lerp(A.Position, B.Position, Alpha);
+		Result.PreviousPosition = FMath::Lerp(A.PreviousPosition, B.PreviousPosition, Alpha);
+		Result.Velocity = FMath::Lerp(A.Velocity, B.Velocity, Alpha);
+		Result.MaterialCoordinate = FMath::Lerp(A.MaterialCoordinate, B.MaterialCoordinate, Alpha);
+		Result.EstimatedTension = FMath::Lerp(A.EstimatedTension, B.EstimatedTension, Alpha);
+		Result.EstimatedNormalLoad = FMath::Lerp(A.EstimatedNormalLoad, B.EstimatedNormalLoad, Alpha);
+		return Result;
+	}
 
-		const bool bBothEndpointsKinematic =
-			Input.StartEndpoint.Mode == EParticleMode::Kinematic
-			&& Input.EndEndpoint.Mode == EParticleMode::Kinematic;
-		const double EndpointDistance = FVector3d::Distance(
-			Input.StartEndpoint.TargetPosition,
-			Input.EndEndpoint.TargetPosition);
-		EffectiveSolveLength = bBothEndpointsKinematic
-			? FMath::Max(Config.RestLength, EndpointDistance)
-			: Config.RestLength;
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
-
-		const double DampingMultiplier = FMath::Clamp(1.0 - Config.VelocityDamping, 0.0, 1.0);
-		for (FParticle& Particle : Particles)
+	bool FSolver::SetActiveLength(const double NewLength, const ELengthChangeOrigin Origin)
+	{
+		if (!IsInitialized() || bStepActive || !FMath::IsFinite(NewLength) || NewLength < 1.0)
 		{
-			Particle.PreviousPosition = Particle.Position;
-			if (Particle.Mode == EParticleMode::Kinematic)
+			return false;
+		}
+		const double CurrentLength = GetActiveLength();
+		const double Delta = NewLength - CurrentLength;
+		if (FMath::Abs(Delta) <= SmallNumber) return true;
+		const double StartShare = Origin == ELengthChangeOrigin::Start ? 1.0
+			: (Origin == ELengthChangeOrigin::Both ? 0.5 : 0.0);
+		const double EndShare = 1.0 - StartShare;
+		if (Delta > 0.0)
+		{
+			if (FMath::CeilToInt(NewLength / Config.SegmentLength) + 1 > Config.MaximumParticles) return false;
+			AddLengthAtEndpoint(Delta * StartShare, EEndpoint::Start);
+			AddLengthAtEndpoint(Delta * EndShare, EEndpoint::End);
+		}
+		else
+		{
+			RemoveLengthAtEndpoint(-Delta * StartShare, EEndpoint::Start);
+			RemoveLengthAtEndpoint(-Delta * EndShare, EEndpoint::End);
+		}
+		Config.Length = GetActiveLength();
+		DistanceLambdas.Init(0.0, Particles.Num() - 1);
+		ParticleFrictionCorrections.Init(0.0, Particles.Num());
+		RecalculateParticleMasses();
+		LastValidState = CaptureState();
+		return NearlyEqual(Config.Length, NewLength, 1.e-6);
+	}
+
+	void FSolver::AddLengthAtEndpoint(const double Amount, const EEndpoint Endpoint)
+	{
+		if (Amount <= SmallNumber) return;
+		if (Endpoint == EEndpoint::Start)
+		{
+			for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate += Amount;
+		}
+		else
+		{
+			Particles.Last().MaterialCoordinate += Amount;
+		}
+		NormalizeEndpointResolution(Endpoint);
+	}
+
+	void FSolver::RemoveLengthAtEndpoint(double Amount, const EEndpoint Endpoint)
+	{
+		Amount = FMath::Min(Amount, GetActiveLength() - 1.0);
+		while (Amount > SmallNumber && Particles.Num() >= 2)
+		{
+			if (Endpoint == EEndpoint::Start)
 			{
-				Particle.Position = Particle.KinematicTarget;
-				continue;
-			}
-			Particle.Velocity *= DampingMultiplier;
-			Particle.Velocity += Config.Gravity * Input.DeltaTime;
-			Particle.Position += Particle.Velocity * Input.DeltaTime;
-		}
-
-		TArray<FContactConstraint> Contacts;
-		if (ContactGenerator)
-		{
-			ContactGenerator(Particles, Contacts);
-		}
-		SanitizeContacts(Particles, Contacts);
-		TArray<FGuideConstraint> Guides = Input.GuideConstraints;
-		for (int32 Index = Guides.Num() - 1; Index >= 0; --Index)
-		{
-			FGuideConstraint& Guide = Guides[Index];
-			if (!Particles.IsValidIndex(Guide.ParticleIndex)
-				|| Particles[Guide.ParticleIndex].Mode != EParticleMode::Dynamic
-				|| !IsFinite(Guide.TargetPosition)
-				|| !FMath::IsFinite(Guide.MaximumDistance)
-				|| !FMath::IsFinite(Guide.StepStrength))
-			{
-				Guides.RemoveAt(Index, 1, EAllowShrinking::No);
-				continue;
-			}
-			Guide.MaximumDistance = FMath::Max(Guide.MaximumDistance, 0.0);
-			Guide.StepStrength = FMath::Clamp(Guide.StepStrength, 0.0, 1.0);
-		}
-
-		ProjectedContacts.Init(false, Contacts.Num());
-		ContactNormalCorrections.Init(0.0, Contacts.Num());
-		TArray<double> AccumulatedStaticCorrections;
-		AccumulatedStaticCorrections.Init(0.0, Particles.Num());
-		ParticleStaticFrictionCorrections.Init(0.0, Particles.Num());
-		ParticleDynamicFrictionVelocityChanges.Init(0.0, Particles.Num());
-		int32 RefreshedContactCount = 0;
-		for (int32 Iteration = 0; Iteration < Config.ConstraintIterations; ++Iteration)
-		{
-			if ((Iteration & 1) == 0)
-			{
-				for (int32 SegmentIndex = 0; SegmentIndex + 1 < Particles.Num(); ++SegmentIndex)
+				const double EdgeLength = Particles[1].MaterialCoordinate;
+				if (Particles.Num() > 2 && Amount >= EdgeLength - SmallNumber)
 				{
-					ProjectDistanceConstraint(SegmentIndex, SegmentIndex + 1);
+					Amount -= EdgeLength;
+					Particles.RemoveAt(1, 1, EAllowShrinking::No);
+					for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate -= EdgeLength;
+					continue;
 				}
+				const double Applied = FMath::Min(Amount, EdgeLength - (Particles.Num() == 2 ? 1.0 : 1.e-4));
+				for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate -= Applied;
+				Amount -= Applied;
 			}
 			else
 			{
-				for (int32 SegmentIndex = Particles.Num() - 2; SegmentIndex >= 0; --SegmentIndex)
+				const int32 Last = Particles.Num() - 1;
+				const double EdgeLength = Particles[Last].MaterialCoordinate - Particles[Last - 1].MaterialCoordinate;
+				if (Particles.Num() > 2 && Amount >= EdgeLength - SmallNumber)
 				{
-					ProjectDistanceConstraint(SegmentIndex, SegmentIndex + 1);
+					Amount -= EdgeLength;
+					Particles.RemoveAt(Last - 1, 1, EAllowShrinking::No);
+					Particles.Last().MaterialCoordinate -= EdgeLength;
+					continue;
 				}
-			}
-			if (Config.BendingStepStrength > 0.0)
-			{
-				const double IterationStrength = CalculateIterationStrength(
-					Config.BendingStepStrength,
-					Config.ConstraintIterations);
-				for (int32 MiddleIndex = 1; MiddleIndex + 1 < Particles.Num(); ++MiddleIndex)
-				{
-					ProjectBendingConstraint(
-						MiddleIndex - 1,
-						MiddleIndex,
-						MiddleIndex + 1,
-						IterationStrength);
-				}
-			}
-			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
-			{
-				const double Correction = ProjectContactConstraint(Contacts[ContactIndex]);
-				if (Correction > 0.0)
-				{
-					ProjectedContacts[ContactIndex] = true;
-					ContactNormalCorrections[ContactIndex] += Correction;
-				}
-			}
-			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
-			{
-				ProjectParticleFriction(
-					ParticleIndex,
-					Contacts,
-					AccumulatedStaticCorrections,
-					Input.DeltaTime);
-			}
-			for (const FGuideConstraint& Guide : Guides)
-			{
-				const double IterationStrength = CalculateIterationStrength(
-					Guide.StepStrength,
-					Config.ConstraintIterations);
-				ProjectGuideConstraint(Guide, IterationStrength);
-			}
-			if (ContactGenerator && Config.ConstraintIterations > 1
-				&& Iteration + 1 == Config.ConstraintIterations / 2)
-			{
-				TArray<FContactConstraint> RefreshedContacts;
-				ContactGenerator(Particles, RefreshedContacts);
-				SanitizeContacts(Particles, RefreshedContacts);
-				RefreshedContactCount = RefreshedContacts.Num();
-				Contacts = MoveTemp(RefreshedContacts);
-				ProjectedContacts.Init(false, Contacts.Num());
-				ContactNormalCorrections.Init(0.0, Contacts.Num());
+				const double Applied = FMath::Min(Amount, EdgeLength - (Particles.Num() == 2 ? 1.0 : 1.e-4));
+				Particles.Last().MaterialCoordinate -= Applied;
+				Amount -= Applied;
 			}
 		}
+		NormalizeEndpointResolution(Endpoint);
+	}
 
+	void FSolver::NormalizeEndpointResolution(const EEndpoint Endpoint)
+	{
+		const double Spacing = FMath::Max(Config.SegmentLength, 1.0);
+		while (Particles.Num() < Config.MaximumParticles)
+		{
+			const int32 A = Endpoint == EEndpoint::Start ? 0 : Particles.Num() - 2;
+			const int32 B = A + 1;
+			const double Rest = Particles[B].MaterialCoordinate - Particles[A].MaterialCoordinate;
+			if (Rest <= 1.5 * Spacing) break;
+			const double Alpha = Endpoint == EEndpoint::Start ? Spacing / Rest : 1.0 - Spacing / Rest;
+			FParticle Inserted = InterpolateParticle(Particles[A], Particles[B], Alpha);
+			Particles.Insert(Inserted, B);
+		}
+		if (Particles.Num() <= 2) return;
+		const int32 A = Endpoint == EEndpoint::Start ? 0 : Particles.Num() - 2;
+		const int32 B = A + 1;
+		const double Rest = Particles[B].MaterialCoordinate - Particles[A].MaterialCoordinate;
+		if (Rest >= 0.5 * Spacing) return;
+		if (Endpoint == EEndpoint::Start) Particles.RemoveAt(1, 1, EAllowShrinking::No);
+		else Particles.RemoveAt(Particles.Num() - 2, 1, EAllowShrinking::No);
+	}
+
+	bool FSolver::RemeshPreservingState(const double NewSegmentLength, const int32 NewMaximumParticles)
+	{
+		if (!IsInitialized() || bStepActive || !FMath::IsFinite(NewSegmentLength) || NewSegmentLength <= 0.0)
+			return false;
+		const double ActiveLength = GetActiveLength();
+		const int32 SegmentCount = FMath::Max(FMath::CeilToInt(ActiveLength / NewSegmentLength), 1);
+		if (SegmentCount + 1 > NewMaximumParticles) return false;
+		const TArray<FParticle> Old = Particles;
+		Particles.SetNum(SegmentCount + 1);
+		int32 OldSegment = 0;
+		for (int32 Index = 0; Index <= SegmentCount; ++Index)
+		{
+			const double Coordinate = ActiveLength * static_cast<double>(Index) / SegmentCount;
+			while (OldSegment + 2 < Old.Num() && Old[OldSegment + 1].MaterialCoordinate < Coordinate) ++OldSegment;
+			const double Span = Old[OldSegment + 1].MaterialCoordinate - Old[OldSegment].MaterialCoordinate;
+			const double Alpha = Span > SmallNumber ? (Coordinate - Old[OldSegment].MaterialCoordinate) / Span : 0.0;
+			Particles[Index] = InterpolateParticle(Old[OldSegment], Old[OldSegment + 1], FMath::Clamp(Alpha, 0.0, 1.0));
+			Particles[Index].MaterialCoordinate = Coordinate;
+		}
+		Config.SegmentLength = NewSegmentLength;
+		Config.MaximumParticles = NewMaximumParticles;
+		DistanceLambdas.Init(0.0, SegmentCount);
+		ParticleFrictionCorrections.Init(0.0, Particles.Num());
+		RecalculateParticleMasses();
+		LastValidState = CaptureState();
+		return ValidateState();
+	}
+
+	void FSolver::RecalculateParticleMasses()
+	{
+		if (Particles.Num() < 2) return;
+		const double Density = FMath::Max(Config.LinearDensity, 1.e-9);
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			double SupportedLength = 0.0;
+			if (Index > 0) SupportedLength += 0.5 * SegmentRestLength(Index - 1);
+			if (Index + 1 < Particles.Num()) SupportedLength += 0.5 * SegmentRestLength(Index);
+			FParticle& Particle = Particles[Index];
+			Particle.Mass = FMath::Max(Density * SupportedLength, 1.e-9);
+			Particle.InverseMass = 1.0 / Particle.Mass;
+		}
+	}
+
+	bool FSolver::BeginStep(const FStepInput& Input)
+	{
+		if (!IsInitialized()) { LastResult.Status = ESimulationStatus::Uninitialized; return false; }
+		if (bStepActive || !FMath::IsFinite(Input.DeltaTime) || Input.DeltaTime <= 0.0
+			|| !IsFinite(Input.StartEndpoint.TargetPosition) || !IsFinite(Input.EndEndpoint.TargetPosition)
+			|| !IsFinite(Input.StartEndpoint.TargetVelocity) || !IsFinite(Input.EndEndpoint.TargetVelocity))
+		{
+			LastResult.Status = ESimulationStatus::InvalidConfiguration;
+			return false;
+		}
+		LastValidState = CaptureState();
+		const double Damping = FMath::Clamp(1.0 - Config.VelocityDamping, 0.0, 1.0);
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			FParticle& Particle = Particles[Index];
+			Particle.PreviousPosition = Particle.Position;
+			const FEndpointInput* EndpointInput = Index == 0 ? &Input.StartEndpoint
+				: (Index == Particles.Num() - 1 ? &Input.EndEndpoint : nullptr);
+			if (EndpointInput && EndpointInput->State != EEndpointState::Free)
+			{
+				continue;
+			}
+			Particle.Velocity = Particle.Velocity * Damping + Config.Gravity * Input.DeltaTime;
+			Particle.Position += Particle.Velocity * Input.DeltaTime;
+		}
+		auto ApplyFixedEndpoint = [this](const EEndpoint Endpoint, const FEndpointInput& EndpointInput)
+		{
+			if (EndpointInput.State != EEndpointState::Fixed) return;
+			FParticle& Particle = Particles[GetEndpointIndex(Endpoint)];
+			Particle.Position = EndpointInput.TargetPosition;
+			Particle.Velocity = EndpointInput.TargetVelocity;
+		};
+		ApplyFixedEndpoint(EEndpoint::Start, Input.StartEndpoint);
+		ApplyFixedEndpoint(EEndpoint::End, Input.EndEndpoint);
+		ProjectEndpointDrive(EEndpoint::Start, Input.StartEndpoint, Input.DeltaTime);
+		ProjectEndpointDrive(EEndpoint::End, Input.EndEndpoint, Input.DeltaTime);
+		// Transport endpoint keyframe motion through material space before the
+		// constraint solve. This is an initial guess, not a constraint: collision
+		// and dynamics still determine the final route. It prevents a long cable's
+		// entire endpoint displacement from appearing as a one-segment impulse.
+		const FVector3d StartMotion = Input.StartEndpoint.State != EEndpointState::Free
+			? Particles[0].Position - Particles[0].PreviousPosition
+			: FVector3d::ZeroVector;
+		const FVector3d EndMotion = Input.EndEndpoint.State != EEndpointState::Free
+			? Particles.Last().Position - Particles.Last().PreviousPosition
+			: FVector3d::ZeroVector;
+		const double ActiveLength = FMath::Max(GetActiveLength(), SmallNumber);
+		for (int32 Index = 1; Index + 1 < Particles.Num(); ++Index)
+		{
+			const double MaterialAlpha = FMath::Clamp(
+				Particles[Index].MaterialCoordinate / ActiveLength,
+				0.0,
+				1.0);
+			Particles[Index].Position += FMath::Lerp(StartMotion, EndMotion, MaterialAlpha);
+		}
+		DistanceLambdas.Init(0.0, Particles.Num() - 1);
+		ParticleFrictionCorrections.Init(0.0, Particles.Num());
+		bStepActive = true;
+		return true;
+	}
+
+	void FSolver::SolveBatch(const FStepInput& Input, TArrayView<FContactConstraint> Contacts, const int32 Iterations)
+	{
+		if (!bStepActive) return;
+		const int32 SafeIterations = FMath::Clamp(Iterations, 0, 256);
+		SolveMultigrid(Input, Contacts);
+		const double PerIterationBend = SafeIterations > 0
+			? 1.0 - FMath::Pow(1.0 - FMath::Clamp(Config.BendStrength, 0.0, 1.0), 1.0 / SafeIterations)
+			: 0.0;
+		for (int32 Iteration = 0; Iteration < SafeIterations; ++Iteration)
+		{
+			if ((Iteration & 1) == 0)
+			{
+				for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment) ProjectDistance(Segment, Input);
+			}
+			else
+			{
+				for (int32 Segment = Particles.Num() - 2; Segment >= 0; --Segment) ProjectDistance(Segment, Input);
+			}
+			for (FContactConstraint& Contact : Contacts) ProjectContact(Contact, Input);
+			for (int32 First = 0; First + 2 < Particles.Num(); ++First) ProjectBend(First, Input, PerIterationBend);
+			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
+				ProjectParticleFriction(ParticleIndex, Contacts, Input);
+		}
+		// A local endpoint/contact disturbance needs O(N) Gauss-Seidel sweeps to
+		// travel through a long slack chain; a coarse endpoint chord cannot see it.
+		// Keep the authored iteration count as the normal cost, then add a bounded
+		// distance/contact-only convergence tail only while an inextensible cable
+		// is still visibly strained.
+		if (Config.DistanceCompliance <= SmallNumber)
+		{
+			const int32 MaximumTailIterations = FMath::Min(Particles.Num() * 4, 512);
+			for (int32 Iteration = 0; Iteration < MaximumTailIterations; ++Iteration)
+			{
+				double MaximumStrain = 0.0;
+				for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment)
+				{
+					const double Rest = SegmentRestLength(Segment);
+					MaximumStrain = FMath::Max(MaximumStrain,
+						(FVector3d::Distance(Particles[Segment].Position, Particles[Segment + 1].Position) - Rest)
+						/ FMath::Max(Rest, SmallNumber));
+				}
+				if (MaximumStrain <= 0.0025) break;
+				if ((Iteration & 1) == 0)
+				{
+					for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment) ProjectDistance(Segment, Input);
+				}
+				else
+				{
+					for (int32 Segment = Particles.Num() - 2; Segment >= 0; --Segment) ProjectDistance(Segment, Input);
+				}
+				for (FContactConstraint& Contact : Contacts) ProjectContact(Contact, Input);
+			}
+		}
+	}
+
+	void FSolver::ReconcileContacts(
+		const FStepInput& Input,
+		TArrayView<FContactConstraint> Contacts,
+		const int32 Iterations)
+	{
+		if (!bStepActive) return;
+		for (int32 Iteration = 0; Iteration < FMath::Clamp(Iterations, 0, 16); ++Iteration)
+		{
+			if ((Iteration & 1) == 0)
+			{
+				for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment) ProjectDistance(Segment, Input);
+			}
+			else
+			{
+				for (int32 Segment = Particles.Num() - 2; Segment >= 0; --Segment) ProjectDistance(Segment, Input);
+			}
+			for (FContactConstraint& Contact : Contacts) ProjectContact(Contact, Input);
+		}
+	}
+
+	FStepResult FSolver::FinalizeStep(const FStepInput& Input, TArrayView<FContactConstraint> Contacts)
+	{
+		if (!bStepActive) return LastResult;
+		bStepActive = false;
+		TArray<FVector3d, TInlineAllocator<128>> PreSolveVelocities;
+		PreSolveVelocities.Reserve(Particles.Num());
+		for (const FParticle& Particle : Particles) PreSolveVelocities.Add(Particle.Velocity);
 		for (FParticle& Particle : Particles)
 		{
-			if (Particle.Mode == EParticleMode::Dynamic)
-			{
-				Particle.Velocity = (Particle.Position - Particle.PreviousPosition) / Input.DeltaTime;
-			}
+			Particle.Velocity = (Particle.Position - Particle.PreviousPosition) / Input.DeltaTime;
 		}
-		if (Input.StartEndpoint.Mode == EParticleMode::Kinematic)
-		{
-			Particles[GetEndpointIndex(EEndpoint::Start, Particles.Num())].Velocity = Input.StartEndpoint.TargetVelocity;
-		}
-		if (Input.EndEndpoint.Mode == EParticleMode::Kinematic)
-		{
-			Particles[GetEndpointIndex(EEndpoint::End, Particles.Num())].Velocity = Input.EndEndpoint.TargetVelocity;
-		}
-		ApplyContactVelocityResponse(Contacts, Input.DeltaTime);
-		UpdateContactLoads(Contacts);
+		ApplyContactVelocityResponse(Contacts, Input, PreSolveVelocities);
+		UpdateContactLoads(Contacts, Input);
+		if (Input.StartEndpoint.State == EEndpointState::Fixed) Particles[0].Velocity = Input.StartEndpoint.TargetVelocity;
+		if (Input.EndEndpoint.State == EEndpointState::Fixed) Particles.Last().Velocity = Input.EndEndpoint.TargetVelocity;
 
 		if (!ValidateState())
 		{
 			RestoreState(LastValidState);
-			bSuspendedAfterFailure = true;
-			LastStepResult.Status = ESimulationStatus::NumericalFailure;
-			return LastStepResult;
+			LastResult.Status = ESimulationStatus::NumericalFailure;
+			return LastResult;
 		}
-
 		++StepIndex;
-		const ESimulationStatus Status = bBothEndpointsKinematic
-			&& EndpointDistance > Config.RestLength + FeasibilityTolerance
-			? ESimulationStatus::Overextended
-			: ESimulationStatus::Ready;
-		UpdateStepResult(Status, EndpointDistance, Contacts, RefreshedContactCount, Guides);
-		LastReplayFrame.Input = Input;
-		LastReplayFrame.Contacts = Contacts;
-		return LastStepResult;
+		LastResult = FStepResult{};
+		LastResult.Status = ESimulationStatus::Ready;
+		if (Input.StartEndpoint.State == EEndpointState::Fixed && Input.EndEndpoint.State == EEndpointState::Fixed
+			&& FVector3d::Distance(Input.StartEndpoint.TargetPosition, Input.EndEndpoint.TargetPosition) > GetActiveLength() + 0.1)
+			LastResult.Status = ESimulationStatus::Overextended;
+		LastResult.StepIndex = StepIndex;
+		LastResult.ParticleCount = Particles.Num();
+		LastResult.ContactCount = Contacts.Num();
+		LastResult.MaximumSegmentError = CalculateMaximumSegmentError();
+		LastResult.MaximumSegmentStrain = 0.0;
+		for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment)
+		{
+			const double Rest = SegmentRestLength(Segment);
+			LastResult.MaximumSegmentStrain = FMath::Max(
+				LastResult.MaximumSegmentStrain,
+				(FVector3d::Distance(Particles[Segment].Position, Particles[Segment + 1].Position) - Rest)
+					/ FMath::Max(Rest, SmallNumber));
+		}
+		LastResult.ActiveLength = GetActiveLength();
+		LastResult.MaximumPenetration = CalculateMaximumPenetration(Contacts);
+		for (const FContactConstraint& Contact : Contacts)
+			LastResult.MaximumContactCorrection = FMath::Max(LastResult.MaximumContactCorrection, Contact.LargestProjection);
+		for (const FParticle& Particle : Particles)
+		{
+			LastResult.MaximumSpeed = FMath::Max(LastResult.MaximumSpeed, Particle.Velocity.Length());
+			LastResult.MaximumEstimatedTension = FMath::Max(LastResult.MaximumEstimatedTension, Particle.EstimatedTension);
+			LastResult.MaximumEstimatedNormalLoad = FMath::Max(LastResult.MaximumEstimatedNormalLoad, Particle.EstimatedNormalLoad);
+			LastResult.MaximumParticleTravel = FMath::Max(LastResult.MaximumParticleTravel,
+				FVector3d::Distance(Particle.Position, Particle.PreviousPosition));
+		}
+		FillEndpointResult(EEndpoint::Start, Input.StartEndpoint, LastResult.StartEndpoint);
+		FillEndpointResult(EEndpoint::End, Input.EndEndpoint, LastResult.EndEndpoint);
+		LastValidState = CaptureState();
+		return LastResult;
+	}
+
+	FStepResult FSolver::AdvanceStep(const FStepInput& Input, TArrayView<FContactConstraint> Contacts)
+	{
+		if (!BeginStep(Input)) return LastResult;
+		SolveBatch(Input, Contacts, Config.SolverIterations);
+		return FinalizeStep(Input, Contacts);
+	}
+
+	int32 FSolver::FindSegmentAtMaterialCoordinate(const double Coordinate, double& OutAlpha) const
+	{
+		OutAlpha = 0.0;
+		if (Particles.Num() < 2) return INDEX_NONE;
+		const double Clamped = FMath::Clamp(Coordinate, 0.0, GetActiveLength());
+		int32 Low = 0;
+		int32 High = Particles.Num() - 1;
+		while (Low + 1 < High)
+		{
+			const int32 Mid = (Low + High) / 2;
+			if (Particles[Mid].MaterialCoordinate <= Clamped) Low = Mid;
+			else High = Mid;
+		}
+		const int32 Segment = FMath::Min(Low, Particles.Num() - 2);
+		const double Span = SegmentRestLength(Segment);
+		OutAlpha = Span > SmallNumber
+			? FMath::Clamp((Clamped - Particles[Segment].MaterialCoordinate) / Span, 0.0, 1.0)
+			: 0.0;
+		return Segment;
+	}
+
+	FVector3d FSolver::SamplePosition(const double Coordinate) const
+	{
+		double Alpha = 0.0;
+		const int32 Segment = FindSegmentAtMaterialCoordinate(Coordinate, Alpha);
+		return Particles.IsValidIndex(Segment + 1) ? FMath::Lerp(Particles[Segment].Position, Particles[Segment + 1].Position, Alpha) : FVector3d::ZeroVector;
+	}
+
+	FVector3d FSolver::SamplePreviousPosition(const double Coordinate) const
+	{
+		double Alpha = 0.0;
+		const int32 Segment = FindSegmentAtMaterialCoordinate(Coordinate, Alpha);
+		return Particles.IsValidIndex(Segment + 1) ? FMath::Lerp(Particles[Segment].PreviousPosition, Particles[Segment + 1].PreviousPosition, Alpha) : FVector3d::ZeroVector;
 	}
 
 	FStateSnapshot FSolver::CaptureState() const
 	{
-		FStateSnapshot Snapshot;
-		Snapshot.Particles = Particles;
-		Snapshot.Config = Config;
-		Snapshot.LastStepResult = LastStepResult;
-		Snapshot.RestSegmentLength = RestSegmentLength;
-		Snapshot.EffectiveSolveLength = EffectiveSolveLength;
-		Snapshot.StepIndex = StepIndex;
-		return Snapshot;
+		return {Particles, Config, LastResult, StepIndex};
 	}
 
 	bool FSolver::RestoreState(const FStateSnapshot& Snapshot)
 	{
-		if (Snapshot.Particles.Num() < 2 || !IsValidConfig(Snapshot.Config)
-			|| !FMath::IsFinite(Snapshot.RestSegmentLength) || Snapshot.RestSegmentLength <= 0.0
-			|| !FMath::IsFinite(Snapshot.EffectiveSolveLength)
-			|| Snapshot.EffectiveSolveLength < Snapshot.Config.RestLength)
-		{
-			return false;
-		}
-		for (const FParticle& Particle : Snapshot.Particles)
-		{
-			if (!IsFinite(Particle.Position) || !IsFinite(Particle.PreviousPosition)
-				|| !IsFinite(Particle.Velocity) || !IsFinite(Particle.KinematicTarget)
-				|| !FMath::IsFinite(Particle.InverseMass)
-				|| !FMath::IsFinite(Particle.MaterialCoordinate)
-				|| !FMath::IsFinite(Particle.EstimatedTension)
-				|| !FMath::IsFinite(Particle.EstimatedNormalLoad))
-			{
-				return false;
-			}
-		}
+		if (Snapshot.Particles.Num() < 2 || !IsValidConfig(Snapshot.Config)) return false;
 		Particles = Snapshot.Particles;
-		Config = SanitizeConfig(Snapshot.Config);
-		LastStepResult = Snapshot.LastStepResult;
-		RestSegmentLength = Snapshot.RestSegmentLength;
-		EffectiveSolveLength = Snapshot.EffectiveSolveLength;
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
+		Config = Snapshot.Config;
+		LastResult = Snapshot.LastResult;
 		StepIndex = Snapshot.StepIndex;
-		bSuspendedAfterFailure = false;
-		return true;
-	}
-
-	double FSolver::CalculateIterationStrength(const double StepStrength, const int32 IterationCount)
-	{
-		const double SafeStepStrength = FMath::Clamp(StepStrength, 0.0, 1.0);
-		return IterationCount > 0
-			? 1.0 - FMath::Pow(1.0 - SafeStepStrength, 1.0 / static_cast<double>(IterationCount))
-			: SafeStepStrength;
-	}
-
-	int32 FSolver::GetEndpointIndex(const EEndpoint Endpoint, const int32 ParticleCount)
-	{
-		return Endpoint == EEndpoint::Start ? 0 : ParticleCount - 1;
+		DistanceLambdas.Init(0.0, Particles.Num() - 1);
+		ParticleFrictionCorrections.Init(0.0, Particles.Num());
+		bStepActive = false;
+		return ValidateState();
 	}
 
 	bool FSolver::IsFinite(const FVector3d& Value)
@@ -387,620 +596,466 @@ namespace CableSim
 		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
 	}
 
-	bool FSolver::IsValidConfig(const FSimulationConfig& InConfig)
+	bool FSolver::IsValidConfig(const FSimulationConfig& Value)
 	{
-		return FMath::IsFinite(InConfig.RestLength) && InConfig.RestLength > 0.0
-			&& FMath::IsFinite(InConfig.NodeSpacing) && InConfig.NodeSpacing > 0.0
-			&& FMath::IsFinite(InConfig.ParticleMass) && InConfig.ParticleMass > 0.0
-			&& IsFinite(InConfig.Gravity)
-			&& FMath::IsFinite(InConfig.VelocityDamping)
-			&& FMath::IsFinite(InConfig.BendingStepStrength)
-			&& FMath::IsFinite(InConfig.FreeBendAngleRadiansPerMeter)
-			&& FMath::IsFinite(InConfig.DistanceOverRelaxation)
-			&& FMath::IsFinite(InConfig.StaticFrictionCoefficient)
-			&& FMath::IsFinite(InConfig.DynamicFrictionCoefficient)
-			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold);
+		return FMath::IsFinite(Value.Length) && Value.Length > 0.0
+			&& FMath::IsFinite(Value.SegmentLength) && Value.SegmentLength > 0.0
+			&& Value.MaximumParticles >= 2 && Value.MaximumParticles <= 4096
+			&& FMath::IsFinite(Value.LinearDensity) && Value.LinearDensity > 0.0
+			&& IsFinite(Value.Gravity)
+			&& FMath::IsFinite(Value.VelocityDamping) && Value.VelocityDamping >= 0.0 && Value.VelocityDamping <= 1.0
+			&& FMath::IsFinite(Value.DistanceCompliance) && Value.DistanceCompliance >= 0.0
+			&& FMath::IsFinite(Value.DistanceRelaxation) && Value.DistanceRelaxation >= 1.0 && Value.DistanceRelaxation <= 1.1
+			&& FMath::IsFinite(Value.BendStrength) && Value.BendStrength >= 0.0 && Value.BendStrength <= 1.0
+			&& FMath::IsFinite(Value.FreeBendDegreesPerMeter) && Value.FreeBendDegreesPerMeter >= 0.0
+			&& FMath::IsFinite(Value.DrivenEndpointMaximumSpeed) && Value.DrivenEndpointMaximumSpeed > 0.0
+			&& Value.SolverIterations >= 1 && Value.SolverIterations <= 256
+			&& Value.MultigridIterations >= 0 && Value.MultigridIterations <= 8
+			&& Value.MultigridMinimumParticles >= 8 && Value.MultigridMinimumParticles <= 4096
+			&& FMath::IsFinite(Value.StaticFriction) && Value.StaticFriction >= 0.0
+			&& FMath::IsFinite(Value.DynamicFriction) && Value.DynamicFriction >= 0.0
+			&& FMath::IsFinite(Value.ConstantFrictionSpeedReduction) && Value.ConstantFrictionSpeedReduction >= 0.0
+			&& FMath::IsFinite(Value.MaximumContactCorrection) && Value.MaximumContactCorrection > 0.0;
 	}
 
-	FSimulationConfig FSolver::SanitizeConfig(const FSimulationConfig& InConfig)
+	int32 FSolver::GetEndpointIndex(const EEndpoint Endpoint) const { return Endpoint == EEndpoint::Start ? 0 : Particles.Num() - 1; }
+
+	double FSolver::EffectiveInverseMass(const int32 Index, const FStepInput& Input) const
 	{
-		FSimulationConfig Result = InConfig;
-		Result.RestLength = FMath::Max(Result.RestLength, MinimumLength);
-		Result.NodeSpacing = FMath::Max(Result.NodeSpacing, MinimumLength);
-		Result.ParticleMass = FMath::Max(Result.ParticleMass, MinimumMass);
-		Result.VelocityDamping = FMath::Clamp(Result.VelocityDamping, 0.0, 1.0);
-		Result.BendingStepStrength = FMath::Clamp(Result.BendingStepStrength, 0.0, 1.0);
-		Result.FreeBendAngleRadiansPerMeter = FMath::Max(Result.FreeBendAngleRadiansPerMeter, 0.0);
-		Result.DistanceOverRelaxation = FMath::Clamp(Result.DistanceOverRelaxation, 1.0, 1.05);
-		Result.ConstraintIterations = FMath::Clamp(Result.ConstraintIterations, 0, 1024);
-		Result.StaticFrictionCoefficient = FMath::Max(Result.StaticFrictionCoefficient, 0.0);
-		Result.DynamicFrictionCoefficient = FMath::Max(Result.DynamicFrictionCoefficient, 0.0);
-		Result.StaticFrictionSpeedThreshold = FMath::Max(Result.StaticFrictionSpeedThreshold, 0.0);
-		return Result;
-	}
-
-	FParticle FSolver::SampleParticle(const TConstArrayView<FParticle> Source, const double NormalizedCoordinate)
-	{
-		const double ScaledIndex = FMath::Clamp(NormalizedCoordinate, 0.0, 1.0) * (Source.Num() - 1);
-		const int32 FirstIndex = FMath::Clamp(FMath::FloorToInt(ScaledIndex), 0, Source.Num() - 1);
-		const int32 SecondIndex = FMath::Min(FirstIndex + 1, Source.Num() - 1);
-		const double Alpha = ScaledIndex - static_cast<double>(FirstIndex);
-		FParticle Result;
-		Result.Position = FMath::Lerp(Source[FirstIndex].Position, Source[SecondIndex].Position, Alpha);
-		Result.PreviousPosition = FMath::Lerp(Source[FirstIndex].PreviousPosition, Source[SecondIndex].PreviousPosition, Alpha);
-		Result.Velocity = FMath::Lerp(Source[FirstIndex].Velocity, Source[SecondIndex].Velocity, Alpha);
-		Result.KinematicTarget = FMath::Lerp(Source[FirstIndex].KinematicTarget, Source[SecondIndex].KinematicTarget, Alpha);
-		Result.EstimatedTension = FMath::Lerp(Source[FirstIndex].EstimatedTension, Source[SecondIndex].EstimatedTension, Alpha);
-		Result.EstimatedNormalLoad = FMath::Lerp(Source[FirstIndex].EstimatedNormalLoad, Source[SecondIndex].EstimatedNormalLoad, Alpha);
-		Result.Mode = EParticleMode::Dynamic;
-		return Result;
-	}
-
-	bool FSolver::RemeshPreservingState(const FSimulationConfig& NewConfig)
-	{
-		if (!IsInitialized())
-		{
-			return false;
-		}
-		const int32 NewSegmentCount = FMath::Clamp(
-			FMath::CeilToInt(NewConfig.RestLength / NewConfig.NodeSpacing),
-			1,
-			MaximumSegmentCount);
-		const TArray<FParticle> OldParticles = Particles;
-		Particles.SetNum(NewSegmentCount + 1);
-		for (int32 Index = 0; Index <= NewSegmentCount; ++Index)
-		{
-			const double Alpha = static_cast<double>(Index) / static_cast<double>(NewSegmentCount);
-			Particles[Index] = SampleParticle(OldParticles, Alpha);
-			Particles[Index].MaterialCoordinate = Alpha * NewConfig.RestLength;
-			Particles[Index].InverseMass = 1.0 / NewConfig.ParticleMass;
-		}
-		Particles[0].Mode = OldParticles[0].Mode;
-		Particles[0].KinematicTarget = OldParticles[0].KinematicTarget;
-		Particles.Last().Mode = OldParticles.Last().Mode;
-		Particles.Last().KinematicTarget = OldParticles.Last().KinematicTarget;
-		return ValidateState();
-	}
-
-	bool FSolver::ValidateState() const
-	{
-		if (Particles.Num() < 2)
-		{
-			return false;
-		}
-		for (const FParticle& Particle : Particles)
-		{
-			if (!IsFinite(Particle.Position) || !IsFinite(Particle.PreviousPosition)
-				|| !IsFinite(Particle.Velocity) || !IsFinite(Particle.KinematicTarget)
-				|| !FMath::IsFinite(Particle.InverseMass)
-				|| !FMath::IsFinite(Particle.MaterialCoordinate)
-				|| !FMath::IsFinite(Particle.EstimatedTension)
-				|| !FMath::IsFinite(Particle.EstimatedNormalLoad))
-			{
-				return false;
-			}
-		}
-		return true;
-	}
-
-	void FSolver::ApplyEndpointInput(const EEndpoint Endpoint, const FEndpointStepInput& EndpointInput)
-	{
-		FParticle& Particle = Particles[GetEndpointIndex(Endpoint, Particles.Num())];
-		Particle.Mode = EndpointInput.Mode;
-		Particle.KinematicTarget = EndpointInput.TargetPosition;
-	}
-
-	double FSolver::GetEffectiveInverseMass(const FParticle& Particle) const
-	{
-		return Particle.Mode == EParticleMode::Kinematic ? 0.0 : Particle.InverseMass;
-	}
-
-	void FSolver::ProjectDistanceConstraint(const int32 FirstIndex, const int32 SecondIndex)
-	{
-		FParticle& First = Particles[FirstIndex];
-		FParticle& Second = Particles[SecondIndex];
-		const double FirstWeight = GetEffectiveInverseMass(First);
-		const double SecondWeight = GetEffectiveInverseMass(Second);
-		const double WeightSum = FirstWeight + SecondWeight;
-		if (WeightSum <= 0.0)
-		{
-			return;
-		}
-
-		const FVector3d Difference = Second.Position - First.Position;
-		const double Distance = Difference.Length();
-		const FVector3d Direction = Distance > 1.e-12
-			? Difference / Distance
-			: ((FirstIndex & 1) == 0 ? FVector3d::UnitX() : -FVector3d::UnitX());
-		// Macklin-style over-relaxation used by the talk: shorten the target by
-		// omega instead of multiplying the entire correction by omega.
-		const FVector3d Correction = Direction
-			* (Distance - SolveSegmentLength / Config.DistanceOverRelaxation);
-		First.Position += Correction * (FirstWeight / WeightSum);
-		Second.Position -= Correction * (SecondWeight / WeightSum);
-	}
-
-	void FSolver::ProjectBendingConstraint(
-		const int32 FirstIndex,
-		const int32 MiddleIndex,
-		const int32 LastIndex,
-		const double IterationStrength)
-	{
-		FParticle& First = Particles[FirstIndex];
-		FParticle& Middle = Particles[MiddleIndex];
-		FParticle& Last = Particles[LastIndex];
-		const FVector3d Baseline = Last.Position - First.Position;
-		const double Span = Baseline.Length();
-		if (Span <= 1.e-12)
-		{
-			return;
-		}
-
-		const FVector3d BaselineDirection = Baseline / Span;
-		const double FirstSpan = FVector3d::DotProduct(Middle.Position - First.Position, BaselineDirection);
-		const double LastSpan = Span - FirstSpan;
-		const FVector3d BaselinePoint = First.Position + BaselineDirection * FirstSpan;
-		const FVector3d Offset = Middle.Position - BaselinePoint;
-		const double OffsetLength = Offset.Length();
-		if (OffsetLength <= 1.e-12)
-		{
-			return;
-		}
-
-		const double FreeAngle = FMath::Clamp(
-			Config.FreeBendAngleRadiansPerMeter * (SolveSegmentLength / 100.0),
-			0.0,
-			UE_PI);
-		const double FreeOffset = SolveSegmentLength * FMath::Cos((UE_PI - FreeAngle) * 0.5);
-		const double Error = FMath::Max(OffsetLength - FreeOffset, 0.0);
-		if (Error <= 0.0)
-		{
-			return;
-		}
-
-		const double FirstWeight = GetEffectiveInverseMass(First);
-		const double MiddleWeight = GetEffectiveInverseMass(Middle);
-		const double LastWeight = GetEffectiveInverseMass(Last);
-		const double Denominator =
-			LastSpan * LastSpan * FirstWeight
-			+ Span * Span * MiddleWeight
-			+ FirstSpan * FirstSpan * LastWeight;
-		if (Denominator <= 1.e-12)
-		{
-			return;
-		}
-
-		const FVector3d CorrectionDirection = Offset / OffsetLength;
-		const double Magnitude = FMath::Clamp(IterationStrength, 0.0, 1.0) * Error * Span / Denominator;
-		First.Position += CorrectionDirection * (LastSpan * FirstWeight * Magnitude);
-		Middle.Position -= CorrectionDirection * (Span * MiddleWeight * Magnitude);
-		Last.Position += CorrectionDirection * (FirstSpan * LastWeight * Magnitude);
-	}
-
-	double FSolver::ProjectContactConstraint(const FContactConstraint& Contact)
-	{
-		FParticle& Particle = Particles[Contact.ParticleIndex];
-		const double Penetration = Contact.MinimumNormalCoordinate
-			- FVector3d::DotProduct(Particle.Position, Contact.Normal);
-		if (Penetration > 0.0)
-		{
-			Particle.Position += Contact.Normal * Penetration;
-			return Penetration;
-		}
+		if (!Particles.IsValidIndex(Index)) return 0.0;
+		const FEndpointInput* Endpoint = Index == 0 ? &Input.StartEndpoint : (Index == Particles.Num() - 1 ? &Input.EndEndpoint : nullptr);
+		if (!Endpoint || Endpoint->State != EEndpointState::Fixed) return Particles[Index].InverseMass;
 		return 0.0;
+	}
+
+	double FSolver::SegmentRestLength(const int32 SegmentIndex) const
+	{
+		return Particles[SegmentIndex + 1].MaterialCoordinate - Particles[SegmentIndex].MaterialCoordinate;
+	}
+
+	void FSolver::ProjectEndpointDrive(
+		const EEndpoint Endpoint,
+		const FEndpointInput& EndpointInput,
+		const double DeltaTime)
+	{
+		if (EndpointInput.State != EEndpointState::Driven)
+		{
+			return;
+		}
+		FParticle& Particle = Particles[GetEndpointIndex(Endpoint)];
+		// The target is intentionally projected once, before structural and
+		// collision constraints. A speed limit turns discontinuous input into the
+		// stable "chasing" behaviour used by gameplay.
+		const FVector3d ToTarget = EndpointInput.TargetPosition - Particle.Position;
+		const double Distance = ToTarget.Length();
+		const double MaximumDistance = Config.DrivenEndpointMaximumSpeed * DeltaTime;
+		Particle.Position += Distance > MaximumDistance && Distance > SmallNumber
+			? ToTarget * (MaximumDistance / Distance)
+			: ToTarget;
+	}
+
+	void FSolver::ProjectDistance(const int32 Segment, const FStepInput& Input)
+	{
+		FParticle& A = Particles[Segment];
+		FParticle& B = Particles[Segment + 1];
+		const FVector3d Delta = B.Position - A.Position;
+		const double Length = Delta.Length();
+		if (Length <= SmallNumber) return;
+		const double InvA = EffectiveInverseMass(Segment, Input);
+		const double InvB = EffectiveInverseMass(Segment + 1, Input);
+		const double Compliance = Config.DistanceCompliance / FMath::Square(Input.DeltaTime);
+		if (InvA + InvB + Compliance <= SmallNumber) return;
+		const double Constraint = Length - SegmentRestLength(Segment);
+		double& Lambda = DistanceLambdas[Segment];
+		const double DeltaLambda = Config.DistanceRelaxation
+			* (-Constraint - Compliance * Lambda) / (InvA + InvB + Compliance);
+		Lambda += DeltaLambda;
+		const FVector3d Direction = Delta / Length;
+		A.Position -= Direction * (InvA * DeltaLambda);
+		B.Position += Direction * (InvB * DeltaLambda);
+	}
+
+	void FSolver::ProjectDistanceRange(
+		const int32 FirstIndex,
+		const int32 SecondIndex,
+		const FStepInput& Input)
+	{
+		if (!Particles.IsValidIndex(FirstIndex) || !Particles.IsValidIndex(SecondIndex)
+			|| FirstIndex >= SecondIndex)
+		{
+			return;
+		}
+		FParticle& A = Particles[FirstIndex];
+		FParticle& B = Particles[SecondIndex];
+		const FVector3d Delta = B.Position - A.Position;
+		const double Length = Delta.Length();
+		if (Length <= SmallNumber) return;
+		const double InvA = EffectiveInverseMass(FirstIndex, Input);
+		const double InvB = EffectiveInverseMass(SecondIndex, Input);
+		if (InvA + InvB <= SmallNumber) return;
+		const double RestLength = B.MaterialCoordinate - A.MaterialCoordinate;
+		// A coarse chord may legitimately be shorter than the material arc when
+		// the rope is slack. Multigrid exists to propagate extension; expanding
+		// that chord would incorrectly straighten the rope and create local strain.
+		if (Length <= RestLength) return;
+		const double Correction = Config.DistanceRelaxation * (Length - RestLength) / (InvA + InvB);
+		const FVector3d Direction = Delta / Length;
+		A.Position += Direction * (InvA * Correction);
+		B.Position -= Direction * (InvB * Correction);
+	}
+
+	void FSolver::SolveMultigrid(
+		const FStepInput& Input,
+		TArrayView<FContactConstraint> Contacts)
+	{
+		if (Config.MultigridIterations <= 0
+			|| Particles.Num() < Config.MultigridMinimumParticles
+			|| Config.DistanceCompliance > SmallNumber)
+		{
+			return;
+		}
+		TSet<int32> RequiredNodes;
+		RequiredNodes.Add(0);
+		RequiredNodes.Add(Particles.Num() - 1);
+		for (const FContactConstraint& Contact : Contacts)
+		{
+			if (Particles.IsValidIndex(Contact.ParticleA)) RequiredNodes.Add(Contact.ParticleA);
+			if (Particles.IsValidIndex(Contact.ParticleB)) RequiredNodes.Add(Contact.ParticleB);
+		}
+		int32 LargestStride = 1;
+		while (LargestStride * 2 < Particles.Num() - 1) LargestStride *= 2;
+		for (int32 Stride = LargestStride; Stride >= 2; Stride /= 2)
+		{
+			TArray<int32> Level;
+			for (int32 Index = 0; Index < Particles.Num(); Index += Stride) Level.Add(Index);
+			if (Level.IsEmpty() || Level.Last() != Particles.Num() - 1) Level.Add(Particles.Num() - 1);
+			for (const int32 Required : RequiredNodes) Level.AddUnique(Required);
+			Level.Sort();
+			TArray<FVector3d> Before;
+			Before.Reserve(Level.Num());
+			for (const int32 Index : Level) Before.Add(Particles[Index].Position);
+			for (int32 Iteration = 0; Iteration < Config.MultigridIterations; ++Iteration)
+			{
+				if ((Iteration & 1) == 0)
+				{
+					for (int32 Pair = 0; Pair + 1 < Level.Num(); ++Pair)
+						ProjectDistanceRange(Level[Pair], Level[Pair + 1], Input);
+				}
+				else
+				{
+					for (int32 Pair = Level.Num() - 2; Pair >= 0; --Pair)
+						ProjectDistanceRange(Level[Pair], Level[Pair + 1], Input);
+				}
+				for (FContactConstraint& Contact : Contacts) ProjectContact(Contact, Input);
+			}
+			for (int32 Pair = 0; Pair + 1 < Level.Num(); ++Pair)
+			{
+				const int32 First = Level[Pair];
+				const int32 Last = Level[Pair + 1];
+				const FVector3d FirstDelta = Particles[First].Position - Before[Pair];
+				const FVector3d LastDelta = Particles[Last].Position - Before[Pair + 1];
+				for (int32 Index = First + 1; Index < Last; ++Index)
+				{
+					if (RequiredNodes.Contains(Index) || EffectiveInverseMass(Index, Input) <= SmallNumber) continue;
+					const double Alpha = static_cast<double>(Index - First) / static_cast<double>(Last - First);
+					Particles[Index].Position += FMath::Lerp(FirstDelta, LastDelta, Alpha);
+				}
+			}
+			for (FContactConstraint& Contact : Contacts) ProjectContact(Contact, Input);
+		}
+	}
+
+	void FSolver::ProjectBend(const int32 First, const FStepInput& Input, const double Strength)
+	{
+		if (Strength <= 0.0) return;
+		FParticle& P1 = Particles[First];
+		FParticle& P2 = Particles[First + 1];
+		FParticle& P3 = Particles[First + 2];
+		const FVector3d Chord = P3.Position - P1.Position;
+		const double S = Chord.Length();
+		if (S <= SmallNumber) return;
+		const FVector3d Direction = Chord / S;
+		const double S1 = FMath::Clamp(FVector3d::DotProduct(P2.Position - P1.Position, Direction), 0.0, S);
+		const double S2 = S - S1;
+		const FVector3d Offset = P2.Position - (P1.Position + Direction * S1);
+		const double E = Offset.Length();
+		if (E <= SmallNumber) return;
+		const double L0 = 0.5 * (SegmentRestLength(First) + SegmentRestLength(First + 1));
+		const double FreeRadiansPerCm = FMath::DegreesToRadians(Config.FreeBendDegreesPerMeter) / 100.0;
+		const double FreeHeight = L0 * FMath::Cos((UE_DOUBLE_PI - FreeRadiansPerCm * L0) * 0.5);
+		const double Excess = E - FMath::Max(FreeHeight, 0.0);
+		if (Excess <= 0.0) return;
+		const double W1 = EffectiveInverseMass(First, Input);
+		const double W2 = EffectiveInverseMass(First + 1, Input);
+		const double W3 = EffectiveInverseMass(First + 2, Input);
+		const double Denominator = S2 * S2 * W1 + S * S * W2 + S1 * S1 * W3;
+		if (Denominator <= SmallNumber) return;
+		const double H = Strength * Excess * S / Denominator;
+		const FVector3d Normal = Offset / E;
+		P1.Position += Normal * (S2 * W1 * H);
+		P2.Position -= Normal * (S * W2 * H);
+		P3.Position += Normal * (S1 * W3 * H);
+	}
+
+	double FSolver::ProjectContact(FContactConstraint& Contact, const FStepInput& Input)
+	{
+		if (!Particles.IsValidIndex(Contact.ParticleA) || !IsFinite(Contact.Normal)) return 0.0;
+		const FVector3d Normal = Contact.Normal.GetSafeNormal();
+		if (Normal.IsNearlyZero()) return 0.0;
+		const double Alpha = Particles.IsValidIndex(Contact.ParticleB) ? FMath::Clamp(Contact.SegmentAlpha, 0.0, 1.0) : 0.0;
+		const double ShapeA = 1.0 - Alpha;
+		const double ShapeB = Alpha;
+		const FVector3d Point = SamplePoint(Particles, Contact, false);
+		const double Constraint = FVector3d::DotProduct(Point, Normal) - Contact.MinimumNormalCoordinate;
+		if (Constraint >= 0.0) return 0.0;
+		const double InvA = EffectiveInverseMass(Contact.ParticleA, Input);
+		const double InvB = Particles.IsValidIndex(Contact.ParticleB) ? EffectiveInverseMass(Contact.ParticleB, Input) : 0.0;
+		const double Denominator = InvA * ShapeA * ShapeA + InvB * ShapeB * ShapeB;
+		if (Denominator <= SmallNumber) return 0.0;
+		const double PointCorrection = FMath::Min(-Constraint, Config.MaximumContactCorrection);
+		const double Lambda = PointCorrection / Denominator;
+		const double CorrectionA = InvA * ShapeA * Lambda;
+		const double CorrectionB = InvB * ShapeB * Lambda;
+		Particles[Contact.ParticleA].Position += Normal * CorrectionA;
+		if (Particles.IsValidIndex(Contact.ParticleB)) Particles[Contact.ParticleB].Position += Normal * CorrectionB;
+		Contact.AccumulatedNormalCorrection += PointCorrection;
+		Contact.AccumulatedParticleCorrectionA += CorrectionA;
+		Contact.AccumulatedParticleCorrectionB += CorrectionB;
+		Contact.LargestProjection = FMath::Max(Contact.LargestProjection, -Constraint);
+		return PointCorrection;
 	}
 
 	void FSolver::ProjectParticleFriction(
 		const int32 ParticleIndex,
 		const TConstArrayView<FContactConstraint> Contacts,
-		TArray<double>& AccumulatedStaticCorrections,
-		const double DeltaTime)
+		const FStepInput& Input)
 	{
-		if (!Config.bEnableFriction || !Particles.IsValidIndex(ParticleIndex)
-			|| Particles[ParticleIndex].Mode != EParticleMode::Dynamic)
+		if (!Particles.IsValidIndex(ParticleIndex)
+			|| EffectiveInverseMass(ParticleIndex, Input) <= SmallNumber)
 		{
 			return;
 		}
-
 		TArray<FVector3d, TInlineAllocator<3>> Normals;
 		FVector3d AverageAnchor = FVector3d::ZeroVector;
-		int32 AnchorCount = 0;
-		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
+		int32 ActiveCount = 0;
+		for (const FContactConstraint& Contact : Contacts)
 		{
-			const FContactConstraint& Contact = Contacts[ContactIndex];
-			if (Contact.ParticleIndex != ParticleIndex
-				|| !ProjectedContacts.IsValidIndex(ContactIndex)
-				|| !ProjectedContacts[ContactIndex])
+			if (Contact.ParticleA != ParticleIndex || !Contact.bEnableFriction
+				|| Contact.AccumulatedNormalCorrection <= 0.0)
 			{
 				continue;
 			}
 			AddOrthonormalNormal(Contact.Normal, Normals);
-			if (Contact.bHasFrictionAnchor)
-			{
-				AverageAnchor += Contact.FrictionAnchorPosition;
-				++AnchorCount;
-			}
+			AverageAnchor += Contact.FrictionAnchor;
+			++ActiveCount;
 		}
-		if (Normals.IsEmpty() || AnchorCount == 0)
-		{
-			return;
-		}
-
+		if (ActiveCount == 0 || Normals.IsEmpty()) return;
+		AverageAnchor /= static_cast<double>(ActiveCount);
 		FParticle& Particle = Particles[ParticleIndex];
-		const FVector3d TangentialVelocity = RemoveNormalComponents(Particle.Velocity, Normals);
-		if (TangentialVelocity.Length() > Config.StaticFrictionSpeedThreshold)
-		{
-			return;
-		}
-		AverageAnchor /= static_cast<double>(AnchorCount);
-		const FVector3d TangentialOffset = RemoveNormalComponents(Particle.Position - AverageAnchor, Normals);
-		const double Distance = TangentialOffset.Length();
-		if (Distance <= 1.e-12)
-		{
-			return;
-		}
-
-		const double Mass = Particle.InverseMass > 0.0 ? 1.0 / Particle.InverseMass : 0.0;
-		if (Mass <= 0.0)
-		{
-			return;
-		}
-		const double StepBudget = Config.StaticFrictionCoefficient
-			* Particle.EstimatedNormalLoad / Mass * 100.0 * DeltaTime * DeltaTime;
-		const double RemainingBudget = FMath::Max(
-			StepBudget - AccumulatedStaticCorrections[ParticleIndex],
-			0.0);
-		const double CorrectionDistance = FMath::Min(Distance, RemainingBudget);
-		if (CorrectionDistance <= 0.0)
-		{
-			return;
-		}
-		Particle.Position -= TangentialOffset * (CorrectionDistance / Distance);
-		AccumulatedStaticCorrections[ParticleIndex] += CorrectionDistance;
-		ParticleStaticFrictionCorrections[ParticleIndex] += CorrectionDistance;
-	}
-
-	void FSolver::ProjectGuideConstraint(const FGuideConstraint& Guide, const double IterationStrength)
-	{
-		FParticle& Particle = Particles[Guide.ParticleIndex];
-		const FVector3d Offset = Particle.Position - Guide.TargetPosition;
-		const double Distance = Offset.Length();
-		if (Distance <= Guide.MaximumDistance || Distance <= 1.e-12)
-		{
-			return;
-		}
-		Particle.Position -= Offset * (((Distance - Guide.MaximumDistance) / Distance) * IterationStrength);
+		const FVector3d Tangent = RemoveNormalComponents(Particle.Position - AverageAnchor, Normals);
+		const double TangentLength = Tangent.Length();
+		if (TangentLength <= SmallNumber) return;
+		const double PointSpeed = RemoveNormalComponents(Particle.Velocity, Normals).Length();
+		const double Fade = Config.FrictionFadeEndSpeed > Config.FrictionFadeStartSpeed
+			? 1.0 - FMath::Clamp((PointSpeed - Config.FrictionFadeStartSpeed)
+				/ (Config.FrictionFadeEndSpeed - Config.FrictionFadeStartSpeed), 0.0, 1.0)
+			: 1.0;
+		const double Mass = Particle.Mass;
+		if (Mass <= SmallNumber) return;
+		const double LoadDisplacement = Particle.EstimatedNormalLoad / Mass * 100.0
+			* Input.DeltaTime * Input.DeltaTime;
+		const double TotalAllowance = Fade
+			* (Config.StaticFrictionDeadZone + Config.StaticFriction * LoadDisplacement);
+		const double Remaining = FMath::Max(TotalAllowance - ParticleFrictionCorrections[ParticleIndex], 0.0);
+		const double CorrectionLength = FMath::Min(TangentLength, Remaining);
+		if (CorrectionLength <= 0.0) return;
+		Particle.Position -= Tangent * (CorrectionLength / TangentLength);
+		ParticleFrictionCorrections[ParticleIndex] += CorrectionLength;
 	}
 
 	void FSolver::ApplyContactVelocityResponse(
-		const TArray<FContactConstraint>& Contacts,
-		const double DeltaTime)
+		const TConstArrayView<FContactConstraint> Contacts,
+		const FStepInput& Input,
+		const TConstArrayView<FVector3d> PreSolveVelocities)
 	{
 		for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
 		{
-			FParticle& Particle = Particles[ParticleIndex];
-			if (Particle.Mode != EParticleMode::Dynamic)
-			{
-				continue;
-			}
+			if (EffectiveInverseMass(ParticleIndex, Input) <= SmallNumber) continue;
 			TArray<FVector3d, TInlineAllocator<3>> Normals;
 			FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 			int32 ActiveCount = 0;
-			for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
+			for (const FContactConstraint& Contact : Contacts)
 			{
-				if (Contacts[ContactIndex].ParticleIndex != ParticleIndex
-					|| !ProjectedContacts.IsValidIndex(ContactIndex)
-					|| !ProjectedContacts[ContactIndex])
-				{
-					continue;
-				}
-				AddOrthonormalNormal(Contacts[ContactIndex].Normal, Normals);
-				SurfaceVelocity += Contacts[ContactIndex].SurfaceVelocity;
+				const double ParticleCorrection = Contact.ParticleA == ParticleIndex
+					? Contact.AccumulatedParticleCorrectionA
+					: (Contact.ParticleB == ParticleIndex ? Contact.AccumulatedParticleCorrectionB : 0.0);
+				if (ParticleCorrection <= 0.0) continue;
+				AddOrthonormalNormal(Contact.Normal, Normals);
+				SurfaceVelocity += Contact.SurfaceVelocity;
 				++ActiveCount;
 			}
-			if (ActiveCount == 0 || Normals.IsEmpty())
-			{
-				continue;
-			}
+			if (ActiveCount == 0 || Normals.IsEmpty()) continue;
 			SurfaceVelocity /= static_cast<double>(ActiveCount);
-			FVector3d RelativeVelocity = Particle.Velocity - SurfaceVelocity;
+			FParticle& Particle = Particles[ParticleIndex];
+			FVector3d Relative = Particle.Velocity - SurfaceVelocity;
+			const FVector3d PreSolveRelative = PreSolveVelocities.IsValidIndex(ParticleIndex)
+				? PreSolveVelocities[ParticleIndex] - SurfaceVelocity
+				: FVector3d::ZeroVector;
 			for (const FVector3d& Normal : Normals)
 			{
-				const double NormalSpeed = FVector3d::DotProduct(RelativeVelocity, Normal);
-				if (NormalSpeed < 0.0)
-				{
-					RelativeVelocity -= Normal * NormalSpeed;
-				}
+				const double CurrentNormalSpeed = FVector3d::DotProduct(Relative, Normal);
+				const double GenuineSeparationSpeed = FMath::Max(
+					FVector3d::DotProduct(PreSolveRelative, Normal),
+					0.0);
+				// Projection is positional repair, not physical restitution. Replace
+				// its apparent speed with only the separation already present before
+				// constraint solving; closing speed becomes zero.
+				Relative += Normal * (GenuineSeparationSpeed - CurrentNormalSpeed);
 			}
-			FVector3d TangentialVelocity = RemoveNormalComponents(RelativeVelocity, Normals);
-			const double TangentialSpeed = TangentialVelocity.Length();
-			if (Config.bEnableFriction && TangentialSpeed > Config.StaticFrictionSpeedThreshold)
+			const FVector3d Tangent = RemoveNormalComponents(Relative, Normals);
+			const double TangentSpeed = Tangent.Length();
+			if (TangentSpeed > SmallNumber)
 			{
-				const double Mass = Particle.InverseMass > 0.0 ? 1.0 / Particle.InverseMass : 0.0;
-				const double SpeedChange = Mass > 0.0
-					? Config.DynamicFrictionCoefficient * Particle.EstimatedNormalLoad / Mass * 100.0 * DeltaTime
-					: 0.0;
-				const FVector3d ReducedTangent = TangentialVelocity
-					* (FMath::Max(TangentialSpeed - SpeedChange, 0.0) / TangentialSpeed);
-				ParticleDynamicFrictionVelocityChanges[ParticleIndex] = FMath::Min(
-					TangentialSpeed,
-					SpeedChange);
-				RelativeVelocity += ReducedTangent - TangentialVelocity;
+				const double Fade = Config.FrictionFadeEndSpeed > Config.FrictionFadeStartSpeed
+					? 1.0 - FMath::Clamp((TangentSpeed - Config.FrictionFadeStartSpeed)
+						/ (Config.FrictionFadeEndSpeed - Config.FrictionFadeStartSpeed), 0.0, 1.0)
+					: 1.0;
+				const double ProportionalSpeed = TangentSpeed
+					* (1.0 - FMath::Clamp(Config.DynamicFriction * Fade, 0.0, 1.0));
+				const double ReducedSpeed = FMath::Max(
+					ProportionalSpeed - Config.ConstantFrictionSpeedReduction * Fade,
+					0.0);
+				Relative += Tangent * (ReducedSpeed / TangentSpeed - 1.0);
 			}
-			Particle.Velocity = SurfaceVelocity + RelativeVelocity;
+			Particle.Velocity = SurfaceVelocity + Relative;
 		}
 	}
 
-	void FSolver::UpdateContactLoads(const TArray<FContactConstraint>& Contacts)
+	void FSolver::UpdateContactLoads(
+		const TConstArrayView<FContactConstraint> Contacts,
+		const FStepInput& Input)
 	{
-		const int32 ParticleCount = Particles.Num();
-		TArray<bool> HasProjectedContact;
-		HasProjectedContact.Init(false, ParticleCount);
+		TArray<bool> HasContact;
+		TArray<bool> HasEdgeContact;
 		TArray<FVector3d> AverageNormals;
-		AverageNormals.Init(FVector3d::ZeroVector, ParticleCount);
-		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
+		HasContact.Init(false, Particles.Num());
+		HasEdgeContact.Init(false, Particles.Num());
+		AverageNormals.Init(FVector3d::ZeroVector, Particles.Num());
+		for (const FContactConstraint& Contact : Contacts)
 		{
-			if (ProjectedContacts.IsValidIndex(ContactIndex) && ProjectedContacts[ContactIndex])
+			if (!Particles.IsValidIndex(Contact.ParticleA) || Contact.AccumulatedNormalCorrection <= 0.0) continue;
+			HasContact[Contact.ParticleA] = true;
+			HasEdgeContact[Contact.ParticleA] |= Contact.FeatureId.Type == ECollisionFeatureType::Edge;
+			AverageNormals[Contact.ParticleA] += Contact.Normal;
+			if (Particles.IsValidIndex(Contact.ParticleB))
 			{
-				const int32 ParticleIndex = Contacts[ContactIndex].ParticleIndex;
-				HasProjectedContact[ParticleIndex] = true;
-				AverageNormals[ParticleIndex] += Contacts[ContactIndex].Normal;
+				HasContact[Contact.ParticleB] = true;
+				HasEdgeContact[Contact.ParticleB] |= Contact.FeatureId.Type == ECollisionFeatureType::Edge;
+				AverageNormals[Contact.ParticleB] += Contact.Normal;
 			}
 		}
-
-		const double ParticleWeight = Config.ParticleMass * Config.Gravity.Length() / 100.0;
 		const double UnsupportedBendThreshold = FMath::DegreesToRadians(30.0);
 		TArray<double> FromStart;
 		TArray<double> FromEnd;
-		FromStart.Init(0.0, ParticleCount);
-		FromEnd.Init(0.0, ParticleCount);
-		for (int32 Index = 1; Index < ParticleCount; ++Index)
+		FromStart.Init(0.0, Particles.Num());
+		FromEnd.Init(0.0, Particles.Num());
+		for (int32 Index = 1; Index < Particles.Num(); ++Index)
 		{
-			FromStart[Index] = FromStart[Index - 1] + ParticleWeight;
-			if (Index + 1 < ParticleCount && !HasProjectedContact[Index])
+			FromStart[Index] = FromStart[Index - 1] + Particles[Index].Mass * Config.Gravity.Length() / 100.0;
+			if (Index + 1 < Particles.Num() && !HasEdgeContact[Index])
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
 				const double Bend = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(A, B), -1.0, 1.0));
-				if (UE_PI - Bend > UnsupportedBendThreshold)
-				{
-					FromStart[Index] = 0.0;
-				}
+				if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromStart[Index] = 0.0;
 			}
 		}
-		for (int32 Index = ParticleCount - 2; Index >= 0; --Index)
+		for (int32 Index = Particles.Num() - 2; Index >= 0; --Index)
 		{
-			FromEnd[Index] = FromEnd[Index + 1] + ParticleWeight;
-			if (Index > 0 && !HasProjectedContact[Index])
+			FromEnd[Index] = FromEnd[Index + 1] + Particles[Index].Mass * Config.Gravity.Length() / 100.0;
+			if (Index > 0 && !HasEdgeContact[Index])
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
 				const double Bend = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(A, B), -1.0, 1.0));
-				if (UE_PI - Bend > UnsupportedBendThreshold)
-				{
-					FromEnd[Index] = 0.0;
-				}
+				if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromEnd[Index] = 0.0;
 			}
 		}
-
-		const bool bStartKinematic = Particles[0].Mode == EParticleMode::Kinematic;
-		const bool bEndKinematic = Particles.Last().Mode == EParticleMode::Kinematic;
-		for (int32 Index = 0; Index < ParticleCount; ++Index)
+		const bool bStartSupported = Input.StartEndpoint.State != EEndpointState::Free;
+		const bool bEndSupported = Input.EndEndpoint.State != EEndpointState::Free;
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
 		{
-			double Tension = 0.0;
-			if (bStartKinematic && !bEndKinematic)
-			{
-				Tension = FromEnd[Index];
-			}
-			else if (!bStartKinematic && bEndKinematic)
-			{
-				Tension = FromStart[Index];
-			}
-			else
-			{
-				Tension = FMath::Min(FromStart[Index], FromEnd[Index]);
-			}
-			Particles[Index].EstimatedTension = Tension;
+			Particles[Index].EstimatedTension = bStartSupported && !bEndSupported
+				? FromEnd[Index]
+				: (!bStartSupported && bEndSupported
+					? FromStart[Index]
+					: FMath::Min(FromStart[Index], FromEnd[Index]));
 		}
-		for (int32 Index = 0; Index < ParticleCount; ++Index)
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
 		{
-			const double Tension = Particles[Index].EstimatedTension;
 			Particles[Index].EstimatedNormalLoad = 0.0;
-			if (!HasProjectedContact[Index])
-			{
-				continue;
-			}
+			if (!HasContact[Index]) continue;
 			const FVector3d Normal = AverageNormals[Index].GetSafeNormal();
-			const double GravityLoad = Config.ParticleMass
+			const double GravityLoad = Particles[Index].Mass
 				* FMath::Max(-FVector3d::DotProduct(Config.Gravity / 100.0, Normal), 0.0);
 			FVector3d BendForce = FVector3d::ZeroVector;
 			if (Index > 0)
-			{
 				BendForce += (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal()
-					* 0.5 * (Tension + Particles[Index - 1].EstimatedTension);
-			}
-			if (Index + 1 < ParticleCount)
-			{
+					* 0.5 * (Particles[Index].EstimatedTension + Particles[Index - 1].EstimatedTension);
+			if (Index + 1 < Particles.Num())
 				BendForce += (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal()
-					* 0.5 * (Tension + Particles[Index + 1].EstimatedTension);
-			}
+					* 0.5 * (Particles[Index].EstimatedTension + Particles[Index + 1].EstimatedTension);
 			Particles[Index].EstimatedNormalLoad = GravityLoad
 				+ FMath::Max(-FVector3d::DotProduct(BendForce, Normal), 0.0);
 		}
-
-		LastContactDiagnostics.Reset(Contacts.Num());
-		for (int32 ContactIndex = 0; ContactIndex < Contacts.Num(); ++ContactIndex)
-		{
-			const FContactConstraint& Contact = Contacts[ContactIndex];
-			FContactDiagnostic& Diagnostic = LastContactDiagnostics.AddDefaulted_GetRef();
-			Diagnostic.FeatureId = Contact.FeatureId;
-			Diagnostic.ParticleIndex = Contact.ParticleIndex;
-			Diagnostic.Normal = Contact.Normal;
-			Diagnostic.bProjected = ProjectedContacts.IsValidIndex(ContactIndex) && ProjectedContacts[ContactIndex];
-			Diagnostic.NormalCorrection = ContactNormalCorrections.IsValidIndex(ContactIndex)
-				? ContactNormalCorrections[ContactIndex] : 0.0;
-			Diagnostic.StaticFrictionCorrection = ParticleStaticFrictionCorrections.IsValidIndex(Contact.ParticleIndex)
-				? ParticleStaticFrictionCorrections[Contact.ParticleIndex] : 0.0;
-			Diagnostic.DynamicFrictionVelocityChange = ParticleDynamicFrictionVelocityChanges.IsValidIndex(Contact.ParticleIndex)
-				? ParticleDynamicFrictionVelocityChanges[Contact.ParticleIndex] : 0.0;
-			Diagnostic.EstimatedTension = Particles[Contact.ParticleIndex].EstimatedTension;
-			Diagnostic.EstimatedNormalLoad = Particles[Contact.ParticleIndex].EstimatedNormalLoad;
-			Diagnostic.bStaticAnchorHeld = Diagnostic.bProjected && Contact.bHasFrictionAnchor;
-		}
 	}
 
-	void FSolver::SanitizeContacts(
-		const TConstArrayView<FParticle> InParticles,
-		TArray<FContactConstraint>& Contacts)
+	bool FSolver::ValidateState() const
 	{
-		for (int32 Index = Contacts.Num() - 1; Index >= 0; --Index)
+		if (Particles.Num() < 2 || Particles.Num() > Config.MaximumParticles) return false;
+		double Previous = -1.0;
+		for (const FParticle& Particle : Particles)
 		{
-			FContactConstraint& Contact = Contacts[Index];
-			if (!InParticles.IsValidIndex(Contact.ParticleIndex)
-				|| InParticles[Contact.ParticleIndex].Mode != EParticleMode::Dynamic
-				|| !IsFinite(Contact.Normal)
-				|| !FMath::IsFinite(Contact.MinimumNormalCoordinate)
-				|| !IsFinite(Contact.SurfaceVelocity)
-				|| (Contact.bHasFrictionAnchor && !IsFinite(Contact.FrictionAnchorPosition)))
-			{
-				Contacts.RemoveAt(Index, 1, EAllowShrinking::No);
-				continue;
-			}
-			Contact.Normal = Contact.Normal.GetSafeNormal();
-			if (Contact.Normal.IsNearlyZero())
-			{
-				Contacts.RemoveAt(Index, 1, EAllowShrinking::No);
-				continue;
-			}
-			bool bHasKinematicReference = false;
-			bool bPlaneIsReachable = false;
-			for (const int32 EndpointIndex : {0, InParticles.Num() - 1})
-			{
-				const FParticle& EndpointParticle = InParticles[EndpointIndex];
-				if (EndpointParticle.Mode != EParticleMode::Kinematic)
-				{
-					continue;
-				}
-				bHasKinematicReference = true;
-				const double AvailableArcLength = FMath::Abs(
-					InParticles[Contact.ParticleIndex].MaterialCoordinate
-						- EndpointParticle.MaterialCoordinate);
-				const double RequiredNormalDistance = FMath::Max(
-					Contact.MinimumNormalCoordinate
-						- FVector3d::DotProduct(EndpointParticle.Position, Contact.Normal),
-					0.0);
-				if (RequiredNormalDistance <= AvailableArcLength + FeasibilityTolerance)
-				{
-					bPlaneIsReachable = true;
-					break;
-				}
-			}
-			if (bHasKinematicReference && !bPlaneIsReachable)
-			{
-				Contacts.RemoveAt(Index, 1, EAllowShrinking::No);
-				continue;
-			}
+			if (!IsFinite(Particle.Position) || !IsFinite(Particle.PreviousPosition) || !IsFinite(Particle.Velocity)
+				|| !FMath::IsFinite(Particle.Mass) || Particle.Mass <= 0.0
+				|| !FMath::IsFinite(Particle.InverseMass) || Particle.InverseMass <= 0.0
+				|| !FMath::IsFinite(Particle.EstimatedTension) || !FMath::IsFinite(Particle.EstimatedNormalLoad)
+				|| !FMath::IsFinite(Particle.MaterialCoordinate) || Particle.MaterialCoordinate <= Previous) return false;
+			Previous = Particle.MaterialCoordinate;
 		}
-		Contacts.StableSort([](const FContactConstraint& First, const FContactConstraint& Second)
-		{
-			if (First.ParticleIndex != Second.ParticleIndex)
-			{
-				return First.ParticleIndex < Second.ParticleIndex;
-			}
-			return First.FeatureId < Second.FeatureId;
-		});
+		return NearlyEqual(Particles[0].MaterialCoordinate, 0.0, 1.e-9)
+			&& NearlyEqual(Particles.Last().MaterialCoordinate, Config.Length, 1.e-6);
 	}
 
 	double FSolver::CalculateMaximumSegmentError() const
 	{
-		double MaximumError = 0.0;
-		for (int32 SegmentIndex = 0; SegmentIndex + 1 < Particles.Num(); ++SegmentIndex)
-		{
-			MaximumError = FMath::Max(
-				MaximumError,
-				FMath::Abs(FVector3d::Distance(
-					Particles[SegmentIndex].Position,
-					Particles[SegmentIndex + 1].Position) - SolveSegmentLength));
-		}
-		return MaximumError;
+		double Maximum = 0.0;
+		for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment)
+			Maximum = FMath::Max(Maximum, FMath::Abs(FVector3d::Distance(Particles[Segment].Position, Particles[Segment + 1].Position) - SegmentRestLength(Segment)));
+		return Maximum;
 	}
 
-	double FSolver::CalculateMaximumPenetration(const TArray<FContactConstraint>& Contacts) const
+	double FSolver::CalculateMaximumPenetration(const TConstArrayView<FContactConstraint> Contacts) const
 	{
-		double MaximumPenetration = 0.0;
+		double Maximum = 0.0;
 		for (const FContactConstraint& Contact : Contacts)
 		{
-			MaximumPenetration = FMath::Max(
-				MaximumPenetration,
-				Contact.MinimumNormalCoordinate
-					- FVector3d::DotProduct(Particles[Contact.ParticleIndex].Position, Contact.Normal));
+			if (!Particles.IsValidIndex(Contact.ParticleA)) continue;
+			Maximum = FMath::Max(Maximum, Contact.MinimumNormalCoordinate
+				- FVector3d::DotProduct(SamplePoint(Particles, Contact, false), Contact.Normal));
 		}
-		return FMath::Max(MaximumPenetration, 0.0);
+		return FMath::Max(Maximum, 0.0);
 	}
 
-	double FSolver::CalculateMaximumGuideError(const TArray<FGuideConstraint>& Guides) const
+	void FSolver::FillEndpointResult(const EEndpoint Endpoint, const FEndpointInput& Input, FEndpointResult& Result) const
 	{
-		double MaximumError = 0.0;
-		for (const FGuideConstraint& Guide : Guides)
-		{
-			MaximumError = FMath::Max(
-				MaximumError,
-				FVector3d::Distance(Particles[Guide.ParticleIndex].Position, Guide.TargetPosition)
-					- Guide.MaximumDistance);
-		}
-		return FMath::Max(MaximumError, 0.0);
-	}
-
-	void FSolver::UpdateStepResult(
-		const ESimulationStatus Status,
-		const double EndpointDistance,
-		const TArray<FContactConstraint>& Contacts,
-		const int32 RefreshedContactCount,
-		const TArray<FGuideConstraint>& Guides)
-	{
-		LastStepResult.Status = Status;
-		LastStepResult.StepIndex = StepIndex;
-		LastStepResult.ParticleCount = Particles.Num();
-		LastStepResult.ConstraintIterations = Config.ConstraintIterations;
-		LastStepResult.ContactCount = Contacts.Num();
-		LastStepResult.RefreshedContactCount = RefreshedContactCount;
-		LastStepResult.GuideConstraintCount = Guides.Num();
-		LastStepResult.RestLength = Config.RestLength;
-		LastStepResult.EffectiveSolveLength = EffectiveSolveLength;
-		LastStepResult.EndpointDistance = EndpointDistance;
-		LastStepResult.StrainRatio = Config.RestLength > 0.0
-			? FMath::Max(EndpointDistance / Config.RestLength - 1.0, 0.0)
-			: 0.0;
-		LastStepResult.MaximumSegmentError = CalculateMaximumSegmentError();
-		LastStepResult.MaximumPenetration = CalculateMaximumPenetration(Contacts);
-		LastStepResult.MaximumGuideError = CalculateMaximumGuideError(Guides);
-		double SpeedSquaredSum = 0.0;
-		LastStepResult.MaximumParticleSpeed = 0.0;
-		LastStepResult.MaximumEstimatedTension = 0.0;
-		LastStepResult.MaximumEstimatedNormalLoad = 0.0;
-		for (const FParticle& Particle : Particles)
-		{
-			const double SpeedSquared = Particle.Velocity.SquaredLength();
-			SpeedSquaredSum += SpeedSquared;
-			LastStepResult.MaximumParticleSpeed = FMath::Max(
-				LastStepResult.MaximumParticleSpeed,
-				FMath::Sqrt(SpeedSquared));
-			LastStepResult.MaximumEstimatedTension = FMath::Max(
-				LastStepResult.MaximumEstimatedTension,
-				Particle.EstimatedTension);
-			LastStepResult.MaximumEstimatedNormalLoad = FMath::Max(
-				LastStepResult.MaximumEstimatedNormalLoad,
-				Particle.EstimatedNormalLoad);
-		}
-		LastStepResult.ProjectedContactCount = 0;
-		LastStepResult.StaticFrictionAnchorCount = 0;
-		for (const FContactDiagnostic& Diagnostic : LastContactDiagnostics)
-		{
-			LastStepResult.ProjectedContactCount += Diagnostic.bProjected ? 1 : 0;
-			LastStepResult.StaticFrictionAnchorCount += Diagnostic.bStaticAnchorHeld ? 1 : 0;
-		}
-		LastStepResult.RmsParticleSpeed = Particles.IsEmpty()
-			? 0.0
-			: FMath::Sqrt(SpeedSquaredSum / static_cast<double>(Particles.Num()));
+		const FParticle& Particle = Particles[GetEndpointIndex(Endpoint)];
+		Result.State = Input.State;
+		Result.RequestedPosition = Input.State == EEndpointState::Free ? Particle.Position : Input.TargetPosition;
+		Result.AcceptedPosition = Particle.Position;
+		Result.Velocity = Particle.Velocity;
+		Result.Correction = Particle.Position - Result.RequestedPosition;
+		Result.LimitError = Result.Correction.Length();
+		Result.bLimited = Input.State == EEndpointState::Driven && Result.LimitError > 0.1;
 	}
 }

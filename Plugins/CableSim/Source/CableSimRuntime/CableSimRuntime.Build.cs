@@ -6,7 +6,6 @@ public class CableSimRuntime : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		CppStandard = CppStandardVersion.Cpp20;
-
 		PublicDependencyModuleNames.AddRange(new[]
 		{
 			"Core",
@@ -14,7 +13,6 @@ public class CableSimRuntime : ModuleRules
 			"Engine",
 			"CableSimCore"
 		});
-
 		PrivateDependencyModuleNames.AddRange(new[]
 		{
 			"Chaos",
