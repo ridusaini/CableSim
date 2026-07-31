@@ -56,6 +56,12 @@ namespace CableSim
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
 		double ContactActiveBand = 1.0;
+		// Talk: "if you have a rope that's almost taut, it basically feels like
+		// it would never converge" without multigrid. 0 disables it (flat
+		// Gauss-Seidel sweep only); below MultigridMinimumParticles it is a
+		// cheap no-op, since a short cable's fine sweep already converges fast.
+		int32 MultigridIterations = 4;
+		int32 MultigridMinimumParticles = 64;
 
 		bool Equals(const FSimulationConfig& Other, double Tolerance = 1.e-9) const;
 	};
@@ -194,7 +200,8 @@ namespace CableSim
 		bool ValidateState() const;
 		void ApplyEndpointInput(EEndpoint Endpoint, const FEndpointStepInput& EndpointInput);
 		double GetEffectiveInverseMass(const FParticle& Particle) const;
-		void ProjectDistanceConstraint(int32 FirstIndex, int32 SecondIndex);
+		void ProjectDistanceConstraint(int32 FirstIndex, int32 SecondIndex, bool bPullOnly = false);
+		void SolveMultigrid(TConstArrayView<FContactConstraint> Contacts, TConstArrayView<FGuideConstraint> Guides);
 		void ProjectBendingConstraint(
 			int32 FirstIndex,
 			int32 MiddleIndex,

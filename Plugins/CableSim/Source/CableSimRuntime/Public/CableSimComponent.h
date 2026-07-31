@@ -214,8 +214,12 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double GuideActivationPathRatio = 0.80;
 
+	// Scales the parabolic-catenary sag envelope BaseRadius = GuideSagScale *
+	// sqrt(3 * PathLength * Slack / 8): how far the corridor lets a dynamic node
+	// stray from the taut path, sized to match a real rope's natural sag rather
+	// than a flat fraction of slack.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
-	double GuideSlackScale = 0.50;
+	double GuideSagScale = 1.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
 	double MaximumGuideRadius = 100.0;

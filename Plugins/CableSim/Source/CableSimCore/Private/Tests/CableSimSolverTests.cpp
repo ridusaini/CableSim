@@ -1200,6 +1200,88 @@ bool FCableSimGuideCorridorTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimGuideSagEnvelopeTest,
+	"CableSim.Core.Coupling.GuideSagEnvelopeStaysSmooth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimGuideSagEnvelopeTest::RunTest(const FString& Parameters)
+{
+	// Mirrors BuildTautGuideConstraints' scenario for a straight, unobstructed
+	// span: PathLength stands in for the taut path length (here just the
+	// chord, since there is no obstacle to wrap), Slack is the rope's excess
+	// length over that path, and the per-node radius envelope is applied
+	// exactly as production code computes it. Compares the retired linear
+	// formula (Slack * scale) against the new sag-law formula
+	// (scale * sqrt(3 * PathLength * Slack / 8)) via discrete curvature RMS of
+	// the settled shape -- a multi-lobe "snake" reads as high curvature RMS, a
+	// single smooth sag reads as low.
+	auto MeasureCurvatureRms = [](const bool bUseSagLaw) -> double
+	{
+		const double PathLength = 500.0;
+		const double RestLength = 505.0; // 1% slack: near-taut
+		const double Slack = RestLength - PathLength;
+		const FVector3d Start(-PathLength * 0.5, 0.0, 0.0);
+		const FVector3d End(PathLength * 0.5, 0.0, 0.0);
+		CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(RestLength, 10.0);
+		CableSim::FSolver Solver;
+		if (!Solver.Initialize(Start, End, Config))
+		{
+			return -1.0;
+		}
+		const CableSim::FStepInput BaseInput = CableSimTests::MakeFixedInput(Start, End);
+
+		const double GuideSagScale = 1.0;
+		const double GuideSlackScaleOld = 0.50; // retired linear-formula default, for comparison only
+		const double MaximumGuideRadius = 100.0;
+		const double MinimumGuideRadius = 5.0;
+		const double BaseRadius = bUseSagLaw
+			? FMath::Min(GuideSagScale * FMath::Sqrt(3.0 * PathLength * Slack / 8.0), MaximumGuideRadius)
+			: FMath::Min(Slack * GuideSlackScaleOld, MaximumGuideRadius);
+
+		const int32 ParticleCount = Solver.GetParticles().Num();
+		for (int32 Step = 0; Step < 400; ++Step)
+		{
+			CableSim::FStepInput Input = BaseInput;
+			for (int32 Index = 1; Index + 1 < ParticleCount; ++Index)
+			{
+				const double Alpha = static_cast<double>(Index) / static_cast<double>(ParticleCount - 1);
+				CableSim::FGuideConstraint& Guide = Input.GuideConstraints.AddDefaulted_GetRef();
+				Guide.ParticleIndex = Index;
+				Guide.TargetPosition = FMath::Lerp(Start, End, Alpha);
+				Guide.MaximumDistance = FMath::Max(BaseRadius * FMath::Sin(UE_PI * Alpha), MinimumGuideRadius);
+				Guide.StepStrength = 0.85;
+			}
+			Solver.AdvanceStep(Input);
+		}
+
+		const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
+		double CurvatureSquaredSum = 0.0;
+		int32 CurvatureSamples = 0;
+		for (int32 Index = 1; Index + 1 < Particles.Num(); ++Index)
+		{
+			const FVector3d Previous = (Particles[Index].Position - Particles[Index - 1].Position).GetSafeNormal();
+			const FVector3d Next = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
+			const double CosAngle = FMath::Clamp(FVector3d::DotProduct(Previous, Next), -1.0, 1.0);
+			const double Angle = FMath::Acos(CosAngle);
+			CurvatureSquaredSum += Angle * Angle;
+			++CurvatureSamples;
+		}
+		return CurvatureSamples > 0 ? FMath::Sqrt(CurvatureSquaredSum / CurvatureSamples) : -1.0;
+	};
+
+	const double LinearFormulaCurvatureRms = MeasureCurvatureRms(false);
+	const double SagLawCurvatureRms = MeasureCurvatureRms(true);
+	AddInfo(FString::Printf(
+		TEXT("guide corridor shape: linear-formula curvatureRms=%.4f sag-law curvatureRms=%.4f"),
+		LinearFormulaCurvatureRms, SagLawCurvatureRms));
+	TestTrue(TEXT("Both formulas produced a valid settled shape"),
+		LinearFormulaCurvatureRms >= 0.0 && SagLawCurvatureRms >= 0.0);
+	TestTrue(TEXT("The sag-law corridor settles to a smooth single-lobe shape, not a multi-lobe snake"),
+		SagLawCurvatureRms < 0.05);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautRestBuzzTest,
 	"CableSim.Core.Resting.NearlyTautOnPlane",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1319,6 +1401,120 @@ bool FCableSimNodeCountBenchmarkTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Benchmark particle count"), Solver.GetParticles().Num(), NodeCount);
 		TestFalse(TEXT("Benchmark remains numerically valid"), Solver.IsSuspended());
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimLongRopeMultigridConvergesTest,
+	"CableSim.Core.Convergence.LongRopeMultigrid",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimLongRopeMultigridConvergesTest::RunTest(const FString& Parameters)
+{
+	// Talk: "if you have a rope that's almost taut, it basically feels like it
+	// would never converge" without multigrid. Reproduces that directly: a
+	// 100-segment near-taut cable gets one big lateral endpoint swing (a large,
+	// sudden perturbation the fine sweep alone has to propagate node-by-node
+	// across the whole rope), then a SINGLE step runs with a deliberately small
+	// fine-sweep iteration budget. Multigrid should already carry most of the
+	// correction coarse-to-fine in that one step; flat Gauss-Seidel alone
+	// should still show substantial unconverged segment error.
+	auto MeasureConvergence = [](const int32 MultigridIterations, double& OutMaximumSegmentError) -> bool
+	{
+		const double RestLength = 1000.0;
+		const FVector3d Start(-495.0, 0.0, 0.0);
+		const FVector3d End(495.0, 0.0, 0.0); // 990cm apart: 1% slack, near-taut
+		CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(RestLength, 10.0);
+		Config.ConstraintIterations = 8; // deliberately small fine-sweep budget
+		Config.MultigridIterations = MultigridIterations;
+		Config.MultigridMinimumParticles = 0;
+		Config.Gravity = FVector3d::ZeroVector; // isolate convergence speed from sag dynamics
+		Config.BendingStepStrength = 0.0;
+		CableSim::FSolver Solver;
+		if (!Solver.Initialize(Start, End, Config))
+		{
+			return false;
+		}
+		// One big lateral swing of the End endpoint, staying within RestLength
+		// (890cm chord, 11% slack) so this measures convergence speed, not
+		// overextension handling.
+		const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, FVector3d(300.0, 400.0, 0.0));
+		const CableSim::FStepResult Result = Solver.AdvanceStep(Input);
+		OutMaximumSegmentError = Result.MaximumSegmentError;
+		return Result.Status == CableSim::ESimulationStatus::Ready;
+	};
+
+	double FlatOnlyError = 0.0;
+	double MultigridErrorValue = 0.0;
+	TestTrue(TEXT("Flat-sweep-only run stays numerically valid"), MeasureConvergence(0, FlatOnlyError));
+	TestTrue(TEXT("Multigrid run stays numerically valid"), MeasureConvergence(4, MultigridErrorValue));
+	AddInfo(FString::Printf(
+		TEXT("single-step convergence: flat-only maxSegmentError=%.4f multigrid maxSegmentError=%.4f"),
+		FlatOnlyError, MultigridErrorValue));
+	TestTrue(TEXT("Multigrid converges substantially faster than the flat sweep alone at the same iteration budget"),
+		MultigridErrorValue < FlatOnlyError * 0.5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimMultigridDoesNotPullThroughContactTest,
+	"CableSim.Core.Convergence.MultigridRespectsContact",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimMultigridDoesNotPullThroughContactTest::RunTest(const FString& Parameters)
+{
+	// Talk's explicit caveat: nodes at the collision edge must be part of every
+	// coarse level, or multigrid starts pulling the rope into collision. A
+	// near-taut cable rests across a raised plane at its midpoint (an active
+	// contact partway along a long, otherwise-slack cable); if the coarse pass
+	// skipped that contact node, its coarse span would treat the resting node
+	// as just another interpolation point and drag it straight through the
+	// plane toward the taut chord.
+	const double RestLength = 500.0;
+	const double PlaneHeight = 30.0;
+	const CableSim::FContactGenerator PlaneGenerator =
+		[PlaneHeight](const TConstArrayView<CableSim::FParticle> Particles, TArray<CableSim::FContactConstraint>& Contacts)
+	{
+		for (int32 Index = 0; Index < Particles.Num(); ++Index)
+		{
+			if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+			{
+				continue;
+			}
+			CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+			Contact.FeatureId = 1;
+			Contact.ParticleIndex = Index;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = PlaneHeight;
+			Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+			Contact.bHasFrictionAnchor = true;
+		}
+	};
+
+	const FVector3d Start(-249.0, 0.0, PlaneHeight);
+	const FVector3d End(249.0, 0.0, PlaneHeight); // 498cm apart: 0.4% slack, near-taut
+	CableSim::FSimulationConfig Config = CableSimTests::MakeSettleConfig(RestLength, 5.0);
+	Config.MultigridIterations = 4;
+	Config.MultigridMinimumParticles = 0;
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Solver initializes"), Solver.Initialize(Start, End, Config));
+	const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+	double MinimumZ = TNumericLimits<double>::Max();
+	for (int32 Step = 0; Step < 300; ++Step)
+	{
+		const CableSim::FStepResult Result = Solver.AdvanceStep(Input, PlaneGenerator);
+		if (!TestEqual(TEXT("Step remains numerically valid"), Result.Status, CableSim::ESimulationStatus::Ready))
+		{
+			return false;
+		}
+		for (const CableSim::FParticle& Particle : Solver.GetParticles())
+		{
+			MinimumZ = FMath::Min(MinimumZ, Particle.Position.Z);
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Minimum node height over %d steps: %.4f (plane at %.1f)"), 300, MinimumZ, PlaneHeight));
+	TestTrue(TEXT("No node is pulled through the plane by the coarse multigrid pass"),
+		MinimumZ >= PlaneHeight - 0.5);
 	return true;
 }
 

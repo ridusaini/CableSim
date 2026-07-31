@@ -46,7 +46,9 @@ namespace CableSim
 			&& FMath::IsNearlyEqual(StaticFrictionCoefficient, Other.StaticFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(DynamicFrictionCoefficient, Other.DynamicFrictionCoefficient, Tolerance)
 			&& FMath::IsNearlyEqual(StaticFrictionSpeedThreshold, Other.StaticFrictionSpeedThreshold, Tolerance)
-			&& FMath::IsNearlyEqual(ContactActiveBand, Other.ContactActiveBand, Tolerance);
+			&& FMath::IsNearlyEqual(ContactActiveBand, Other.ContactActiveBand, Tolerance)
+			&& MultigridIterations == Other.MultigridIterations
+			&& MultigridMinimumParticles == Other.MultigridMinimumParticles;
 	}
 
 	bool FSolver::Initialize(
@@ -216,6 +218,11 @@ namespace CableSim
 			Guide.MaximumDistance = FMath::Max(Guide.MaximumDistance, 0.0);
 			Guide.StepStrength = FMath::Clamp(Guide.StepStrength, 0.0, 1.0);
 		}
+
+		// One coarse-to-fine cascade before the fine sweep below, so a near-taut
+		// long cable doesn't need hundreds of flat Gauss-Seidel iterations to
+		// feel a distant endpoint move -- see the talk's own multigrid section.
+		SolveMultigrid(Contacts, Guides);
 
 		ProjectedContacts.Init(false, Contacts.Num());
 		ActiveContacts.Init(false, Contacts.Num());
@@ -401,7 +408,9 @@ namespace CableSim
 			&& FMath::IsFinite(InConfig.StaticFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.DynamicFrictionCoefficient)
 			&& FMath::IsFinite(InConfig.StaticFrictionSpeedThreshold)
-			&& FMath::IsFinite(InConfig.ContactActiveBand);
+			&& FMath::IsFinite(InConfig.ContactActiveBand)
+			&& InConfig.MultigridIterations >= 0
+			&& InConfig.MultigridMinimumParticles >= 0;
 	}
 
 	FSimulationConfig FSolver::SanitizeConfig(const FSimulationConfig& InConfig)
@@ -419,6 +428,8 @@ namespace CableSim
 		Result.DynamicFrictionCoefficient = FMath::Max(Result.DynamicFrictionCoefficient, 0.0);
 		Result.StaticFrictionSpeedThreshold = FMath::Max(Result.StaticFrictionSpeedThreshold, 0.0);
 		Result.ContactActiveBand = FMath::Max(Result.ContactActiveBand, 0.0);
+		Result.MultigridIterations = FMath::Clamp(Result.MultigridIterations, 0, 64);
+		Result.MultigridMinimumParticles = FMath::Max(Result.MultigridMinimumParticles, 0);
 		return Result;
 	}
 
@@ -498,7 +509,7 @@ namespace CableSim
 		return Particle.Mode == EParticleMode::Kinematic ? 0.0 : Particle.InverseMass;
 	}
 
-	void FSolver::ProjectDistanceConstraint(const int32 FirstIndex, const int32 SecondIndex)
+	void FSolver::ProjectDistanceConstraint(const int32 FirstIndex, const int32 SecondIndex, const bool bPullOnly)
 	{
 		FParticle& First = Particles[FirstIndex];
 		FParticle& Second = Particles[SecondIndex];
@@ -516,11 +527,121 @@ namespace CableSim
 			? Difference / Distance
 			: ((FirstIndex & 1) == 0 ? FVector3d::UnitX() : -FVector3d::UnitX());
 		// Macklin-style over-relaxation used by the talk: shorten the target by
-		// omega instead of multiplying the entire correction by omega.
-		const FVector3d Correction = Direction
-			* (Distance - SolveSegmentLength / Config.DistanceOverRelaxation);
+		// omega instead of multiplying the entire correction by omega. Scaling
+		// the rest length by the index span lets this same function serve a
+		// multigrid coarse pair (e.g. every 8th particle) with no separate
+		// formula -- for an adjacent pair (span 1) it's identical to before.
+		const double SpanRestLength = static_cast<double>(SecondIndex - FirstIndex) * SolveSegmentLength;
+		const double Error = Distance - SpanRestLength / Config.DistanceOverRelaxation;
+		// A coarse multigrid pass must never push a span apart: a curled or
+		// sagging path reads as "compressed" in straight-line distance even
+		// though no individual segment is overstretched, and flattening that
+		// out at the coarse level would erase real curvature the fine sweep
+		// never asked to remove (the same class of mistake the talk warns
+		// about for pulling a resting rope through collision).
+		if (bPullOnly && Error <= 0.0)
+		{
+			return;
+		}
+		const FVector3d Correction = Direction * Error;
 		First.Position += Correction * (FirstWeight / WeightSum);
 		Second.Position -= Correction * (SecondWeight / WeightSum);
+	}
+
+	void FSolver::SolveMultigrid(
+		const TConstArrayView<FContactConstraint> Contacts,
+		const TConstArrayView<FGuideConstraint> Guides)
+	{
+		if (Config.MultigridIterations <= 0 || Particles.Num() < Config.MultigridMinimumParticles)
+		{
+			return;
+		}
+		// Talk: nodes at the collision edge must stay part of every coarse
+		// level, or multigrid will pull the rope into collision. Extended here
+		// to guide-constrained nodes too, for the same reason: a coarse span
+		// skipping over a pinned/leashed node would drag it along with the
+		// span's endpoints instead of respecting its own constraint.
+		TSet<int32> RequiredIndices;
+		RequiredIndices.Add(0);
+		RequiredIndices.Add(Particles.Num() - 1);
+		for (const FContactConstraint& Contact : Contacts)
+		{
+			if (Particles.IsValidIndex(Contact.ParticleIndex))
+			{
+				RequiredIndices.Add(Contact.ParticleIndex);
+			}
+		}
+		for (const FGuideConstraint& Guide : Guides)
+		{
+			if (Particles.IsValidIndex(Guide.ParticleIndex))
+			{
+				RequiredIndices.Add(Guide.ParticleIndex);
+			}
+		}
+		int32 LargestStride = 1;
+		while (LargestStride * 2 < Particles.Num() - 1)
+		{
+			LargestStride *= 2;
+		}
+		for (int32 Stride = LargestStride; Stride >= 2; Stride /= 2)
+		{
+			TArray<int32> Level;
+			for (int32 Index = 0; Index < Particles.Num(); Index += Stride)
+			{
+				Level.Add(Index);
+			}
+			if (Level.IsEmpty() || Level.Last() != Particles.Num() - 1)
+			{
+				Level.Add(Particles.Num() - 1);
+			}
+			for (const int32 Required : RequiredIndices)
+			{
+				Level.AddUnique(Required);
+			}
+			Level.Sort();
+			TArray<FVector3d> Before;
+			Before.Reserve(Level.Num());
+			for (const int32 Index : Level)
+			{
+				Before.Add(Particles[Index].Position);
+			}
+			for (int32 Iteration = 0; Iteration < Config.MultigridIterations; ++Iteration)
+			{
+				if ((Iteration & 1) == 0)
+				{
+					for (int32 Pair = 0; Pair + 1 < Level.Num(); ++Pair)
+					{
+						ProjectDistanceConstraint(Level[Pair], Level[Pair + 1], /*bPullOnly=*/true);
+					}
+				}
+				else
+				{
+					for (int32 Pair = Level.Num() - 2; Pair >= 0; --Pair)
+					{
+						ProjectDistanceConstraint(Level[Pair], Level[Pair + 1], /*bPullOnly=*/true);
+					}
+				}
+			}
+			// Spread each coarse pair's net motion across the finer particles it
+			// skipped, so the fine sweep starts closer to converged instead of
+			// having to walk the whole correction up from scratch node by node.
+			for (int32 Pair = 0; Pair + 1 < Level.Num(); ++Pair)
+			{
+				const int32 First = Level[Pair];
+				const int32 Last = Level[Pair + 1];
+				const FVector3d FirstDelta = Particles[First].Position - Before[Pair];
+				const FVector3d LastDelta = Particles[Last].Position - Before[Pair + 1];
+				for (int32 Index = First + 1; Index < Last; ++Index)
+				{
+					if (RequiredIndices.Contains(Index) || GetEffectiveInverseMass(Particles[Index]) <= 0.0)
+					{
+						continue;
+					}
+					const double Alpha = static_cast<double>(Index - First) / static_cast<double>(Last - First);
+					Particles[Index].Position += FMath::Lerp(FirstDelta, LastDelta, Alpha);
+				}
+			}
+		}
 	}
 
 	void FSolver::ProjectBendingConstraint(

@@ -1075,8 +1075,14 @@ void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) 
 		return;
 	}
 	const double Slack = FMath::Max(SimulationSettings.RestLength - PathLength, 0.0);
+	// Parabolic-catenary sag envelope, not a linear function of slack: a rope
+	// with PathLength span and Slack excess length sags by ~sqrt(3*span*slack/8)
+	// at its deepest point under the standard small-sag catenary approximation.
+	// Using this instead of a flat Slack*scale means the corridor already
+	// matches the shape a real near-taut rope settles into, so the guide isn't
+	// fighting the rope's own natural rest shape as slack shrinks.
 	const double BaseRadius = FMath::Min(
-		Slack * FMath::Max(TautSettings.GuideSlackScale, 0.0),
+		FMath::Max(TautSettings.GuideSagScale, 0.0) * FMath::Sqrt(3.0 * PathLength * Slack / 8.0),
 		FMath::Max(TautSettings.MaximumGuideRadius, 0.0));
 	for (int32 ParticleIndex = 1; ParticleIndex + 1 < Particles.Num(); ++ParticleIndex)
 	{
