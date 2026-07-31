@@ -308,6 +308,71 @@ bool FCableSimLongCableMultigridTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimCapstanFrictionDepletesTensionTest,
+	"CableSim.Core.Dynamic.CapstanFrictionDepletesTensionAcrossWrap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimCapstanFrictionDepletesTensionTest::RunTest(const FString& Parameters)
+{
+	// A rope fixed at particle 0, hanging free at particle 4, folded roughly 90
+	// degrees at particle 2. Particle 2 is tagged as an edge contact so
+	// UpdateContactLoads treats it as a wrap rather than an unsupported bend.
+	auto BuildFoldedSolver = [](double StaticFriction, CableSim::FStepResult& OutResult) -> CableSim::FSolver
+	{
+		CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
+		Config.Length = 40.0;
+		Config.SegmentLength = 10.0;
+		Config.Gravity = FVector3d(0.0, 0.0, -980.665);
+		Config.StaticFriction = StaticFriction;
+		CableSim::FSolver Solver;
+		Solver.Initialize(FVector3d::ZeroVector, FVector3d(40.0, 0.0, 0.0), Config);
+		CableSim::FStateSnapshot Folded = Solver.CaptureState();
+		Folded.Particles[3].Position = FVector3d(20.0, 0.0, -10.0);
+		Folded.Particles[3].PreviousPosition = Folded.Particles[3].Position;
+		Folded.Particles[4].Position = FVector3d(20.0, 0.0, -20.0);
+		Folded.Particles[4].PreviousPosition = Folded.Particles[4].Position;
+		Solver.RestoreState(Folded);
+
+		CableSim::FStepInput Input = CableSimTests::FreeInput();
+		Input.StartEndpoint.State = CableSim::EEndpointState::Fixed;
+		Input.StartEndpoint.TargetPosition = FVector3d::ZeroVector;
+		CableSim::FContactConstraint Contact;
+		Contact.ParticleA = 2;
+		Contact.FeatureId.Type = CableSim::ECollisionFeatureType::Edge;
+		Contact.Normal = FVector3d::UnitX();
+		Contact.MinimumNormalCoordinate = Solver.GetParticles()[2].Position.X + 1.0;
+		OutResult = Solver.AdvanceStep(Input, MakeArrayView(&Contact, 1));
+		return Solver;
+	};
+
+	CableSim::FStepResult BaselineResult;
+	CableSim::FSolver Baseline = BuildFoldedSolver(0.0, BaselineResult);
+	CableSim::FStepResult DepletedResult;
+	CableSim::FSolver Depleted = BuildFoldedSolver(0.5, DepletedResult);
+
+	TestEqual(TEXT("Baseline step is valid"), BaselineResult.Status, CableSim::ESimulationStatus::Ready);
+	TestEqual(TEXT("Depleted step is valid"), DepletedResult.Status, CableSim::ESimulationStatus::Ready);
+
+	const double BaselineWrapTension = Baseline.GetParticles()[2].EstimatedTension;
+	const double DepletedWrapTension = Depleted.GetParticles()[2].EstimatedTension;
+	AddInfo(FString::Printf(
+		TEXT("wrap tension baseline=%.6f depleted=%.6f anchor baseline=%.6f depleted=%.6f"),
+		BaselineWrapTension, DepletedWrapTension,
+		Baseline.GetParticles()[0].EstimatedTension, Depleted.GetParticles()[0].EstimatedTension));
+
+	TestTrue(TEXT("A wrap with friction bleeds tension relative to the frictionless baseline"),
+		DepletedWrapTension < BaselineWrapTension - 1.e-6);
+	TestTrue(TEXT("A supported wrap still carries some tension, unlike an unsupported bend"),
+		DepletedWrapTension > 1.e-6);
+	TestTrue(TEXT("Tension loss at the wrap propagates further upstream toward the anchor"),
+		Depleted.GetParticles()[0].EstimatedTension < Baseline.GetParticles()[0].EstimatedTension - 1.e-6);
+	TestTrue(TEXT("Tension on the free side of the wrap is unaffected by depletion at the wrap"),
+		FMath::IsNearlyEqual(
+			Baseline.GetParticles()[4].EstimatedTension, Depleted.GetParticles()[4].EstimatedTension, 1.e-9));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimSuddenEndpointJumpTest,
 	"CableSim.Core.Dynamic.SuddenEndpointJumpSettles",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -943,23 +943,43 @@ namespace CableSim
 		for (int32 Index = 1; Index < Particles.Num(); ++Index)
 		{
 			FromStart[Index] = FromStart[Index - 1] + Particles[Index].Mass * Config.Gravity.Length() / 100.0;
-			if (Index + 1 < Particles.Num() && !HasEdgeContact[Index])
+			if (Index + 1 < Particles.Num())
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
 				const double Bend = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(A, B), -1.0, 1.0));
-				if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromStart[Index] = 0.0;
+				if (!HasEdgeContact[Index])
+				{
+					if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromStart[Index] = 0.0;
+				}
+				else
+				{
+					// Capstan friction (GDC talk): a wrapped edge bleeds tension
+					// proportional to the local normal force (2T cos(Bend/2)) instead
+					// of passing it through unchanged, so a multi-wrap rope loses grip
+					// capacity edge by edge.
+					const double NormalForce = 2.0 * FromStart[Index] * FMath::Cos(0.5 * Bend);
+					FromStart[Index] -= FMath::Clamp(Config.StaticFriction * NormalForce, 0.0, FromStart[Index]);
+				}
 			}
 		}
 		for (int32 Index = Particles.Num() - 2; Index >= 0; --Index)
 		{
 			FromEnd[Index] = FromEnd[Index + 1] + Particles[Index].Mass * Config.Gravity.Length() / 100.0;
-			if (Index > 0 && !HasEdgeContact[Index])
+			if (Index > 0)
 			{
 				const FVector3d A = (Particles[Index - 1].Position - Particles[Index].Position).GetSafeNormal();
 				const FVector3d B = (Particles[Index + 1].Position - Particles[Index].Position).GetSafeNormal();
 				const double Bend = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(A, B), -1.0, 1.0));
-				if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromEnd[Index] = 0.0;
+				if (!HasEdgeContact[Index])
+				{
+					if (UE_DOUBLE_PI - Bend > UnsupportedBendThreshold) FromEnd[Index] = 0.0;
+				}
+				else
+				{
+					const double NormalForce = 2.0 * FromEnd[Index] * FMath::Cos(0.5 * Bend);
+					FromEnd[Index] -= FMath::Clamp(Config.StaticFriction * NormalForce, 0.0, FromEnd[Index]);
+				}
 			}
 		}
 		const bool bStartSupported = Input.StartEndpoint.State != EEndpointState::Free;
