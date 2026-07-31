@@ -172,22 +172,43 @@ namespace
 		const FBox& QueryBounds,
 		TArray<CableSim::FCollisionTriangle>& OutTriangles)
 	{
-		const FVector3d Centre(QueryBounds.GetCenter());
-		Candidates.Sort([&](const CableSim::FCollisionTriangle& A, const CableSim::FCollisionTriangle& B)
-		{
-			const FVector3d CentreA = (A.Vertices[0] + A.Vertices[1] + A.Vertices[2]) / 3.0;
-			const FVector3d CentreB = (B.Vertices[0] + B.Vertices[1] + B.Vertices[2]) / 3.0;
-			const double DistanceA = (CentreA - Centre).SquaredLength();
-			const double DistanceB = (CentreB - Centre).SquaredLength();
-			return DistanceA != DistanceB
-				? DistanceA < DistanceB
-				: CableSim::FCollisionFeatureId::Less(A.Id, B.Id);
-		});
 		const int32 Available = FMath::Max(MaximumTrianglesPerNode - OutTriangles.Num(), 0);
-		for (int32 Index = 0; Index < FMath::Min(Available, Candidates.Num()); ++Index)
+		if (Available <= 0 || Candidates.IsEmpty())
 		{
-			OutTriangles.Add(MoveTemp(Candidates[Index]));
+			return;
 		}
+		if (Candidates.Num() <= Available)
+		{
+			for (CableSim::FCollisionTriangle& Candidate : Candidates) OutTriangles.Add(MoveTemp(Candidate));
+			return;
+		}
+		// Only the nearest Available triangles are kept out of a candidate set that
+		// can be several times larger (up to MaximumTrianglesPerNode * 4). A full
+		// sort orders everything just to discard most of it; a bounded max-heap of
+		// size Available does the same selection in O(n log Available) instead of
+		// O(n log n), keyed on a distance computed once per candidate rather than
+		// on every comparison.
+		const FVector3d Centre(QueryBounds.GetCenter());
+		TArray<TPair<double, int32>> Kept;
+		Kept.Reserve(Available);
+		auto FartherFirst = [](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key > B.Key; };
+		for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+		{
+			const CableSim::FCollisionTriangle& Triangle = Candidates[Index];
+			const FVector3d TriangleCentre = (Triangle.Vertices[0] + Triangle.Vertices[1] + Triangle.Vertices[2]) / 3.0;
+			const double DistanceSquared = (TriangleCentre - Centre).SquaredLength();
+			if (Kept.Num() < Available)
+			{
+				Kept.HeapPush(TPair<double, int32>(DistanceSquared, Index), FartherFirst);
+			}
+			else if (DistanceSquared < Kept.HeapTop().Key)
+			{
+				TPair<double, int32> Discarded;
+				Kept.HeapPop(Discarded, FartherFirst, EAllowShrinking::No);
+				Kept.HeapPush(TPair<double, int32>(DistanceSquared, Index), FartherFirst);
+			}
+		}
+		for (const TPair<double, int32>& Entry : Kept) OutTriangles.Add(MoveTemp(Candidates[Entry.Value]));
 	}
 
 	const Chaos::FImplicitObject* UnwrapGeometry(
@@ -224,20 +245,18 @@ namespace
 		return Geometry;
 	}
 
+	// Handles the cheap analytic shapes only (fixed, small triangle/primitive
+	// counts regardless of query bounds); TriangleMesh/HeightField are handled
+	// once per shape by AddSharedMeshGeometry below, not per node here.
 	bool AddGeometry(
 		const Chaos::FImplicitObject* Geometry,
-		const FTransform& ObjectTransform,
-		const FBox& QueryBounds,
+		const Chaos::EImplicitObjectType Type,
+		const FTransform& LocalToWorld,
+		const FVector3d& Scale,
 		const uint64 ObjectToken,
 		const int32 ShapeIndex,
 		FCableSimNodeCollisionGeometry& OutGeometry)
 	{
-		FTransform LocalToWorld = ObjectTransform;
-		FVector3d Scale;
-		Geometry = UnwrapGeometry(Geometry, LocalToWorld, Scale);
-		if (!Geometry) return false;
-		LocalToWorld.SetScale3D(FVector(Scale));
-		const Chaos::EImplicitObjectType Type = Chaos::GetInnerType(Geometry->GetType());
 		if (Type == Chaos::ImplicitObjectType::Box)
 		{
 			AddBoxTriangles(Geometry->GetObjectChecked<Chaos::FImplicitBox3>(), LocalToWorld, ObjectToken, ShapeIndex, OutGeometry.Triangles);
@@ -269,44 +288,104 @@ namespace
 			Primitive.Radius = Capsule.GetRadiusf() * LocalToWorld.GetScale3D().GetAbsMax();
 			return true;
 		}
-		const Chaos::FAABB3 LocalBounds = TransformBoundsToLocal(QueryBounds, LocalToWorld);
+		return false;
+	}
+
+	FBox TriangleBounds(const CableSim::FCollisionTriangle& Triangle)
+	{
+		FBox Bounds(ForceInit);
+		Bounds += FVector(Triangle.Vertices[0]);
+		Bounds += FVector(Triangle.Vertices[1]);
+		Bounds += FVector(Triangle.Vertices[2]);
+		return Bounds;
+	}
+
+	// A TriangleMesh/HeightField shape used to be queried once per cable node
+	// whose predicted bounds touched it (VisitTriangles is a BVH traversal, so
+	// this repeated the same traversal up to once per overlapping node). Query
+	// it once per shape instead, against the shape's overlap with the whole
+	// cable's bounds, then distribute the shared candidate pool to each
+	// intersecting node with a cheap triangle-bounds-vs-node-bounds test before
+	// running the existing nearest-K selection per node.
+	bool AddSharedMeshGeometry(
+		const Chaos::FImplicitObject* Geometry,
+		const Chaos::EImplicitObjectType Type,
+		const FTransform& LocalToWorld,
+		const uint64 ObjectToken,
+		const int32 ShapeIndex,
+		const FBox& CableQueryBounds,
+		const Chaos::FAABB3& ShapeWorldBounds,
+		const TConstArrayView<int32> IntersectingNodeIndices,
+		TArray<FCableSimNodeCollisionGeometry>& Nodes,
+		FCableSimCollisionDiagnostics& Diagnostics)
+	{
+		const FBox SharedWorldBounds = FBox(FVector(ShapeWorldBounds.Min()), FVector(ShapeWorldBounds.Max())).Overlap(CableQueryBounds);
+		if (!SharedWorldBounds.IsValid)
+		{
+			return false;
+		}
+		const Chaos::FAABB3 LocalBounds = TransformBoundsToLocal(SharedWorldBounds, LocalToWorld);
+		// Scales the per-shape candidate budget with how many nodes will draw from
+		// it (capped at 8x a single node's old allowance) instead of a flat cap,
+		// so a cable widely draped across one shape is not starved relative to
+		// what N separate per-node queries would have gathered between them.
+		const int32 CandidateCap = MaximumTrianglesPerNode * 4 * FMath::Clamp(IntersectingNodeIndices.Num(), 1, 8);
+		TArray<CableSim::FCollisionTriangle> Candidates;
+		Candidates.Reserve(FMath::Min(CandidateCap, MaximumTrianglesPerNode * 32));
+		const CableSim::ECollisionGeometryType GeometryType = Type == Chaos::ImplicitObjectType::TriangleMesh
+			? CableSim::ECollisionGeometryType::TriangleMesh
+			: CableSim::ECollisionGeometryType::HeightField;
+		auto VisitTriangle = [&](const Chaos::FTriangle& Triangle, const int32 TriangleIndex, const int32 V0, const int32 V1, const int32 V2)
+		{
+			if (Candidates.Num() < CandidateCap)
+			{
+				AddTriangle(ObjectToken, ShapeIndex, TriangleIndex, V0, V1, V2,
+					FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[0]))),
+					FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[1]))),
+					FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[2]))),
+					GeometryType, Candidates);
+			}
+		};
 		if (Type == Chaos::ImplicitObjectType::TriangleMesh)
 		{
-			const auto& Mesh = Geometry->GetObjectChecked<Chaos::FTriangleMeshImplicitObject>();
-			TArray<CableSim::FCollisionTriangle> Candidates;
-			Candidates.Reserve(MaximumTrianglesPerNode * 4);
-			Mesh.VisitTriangles(LocalBounds, Chaos::FRigidTransform3::Identity,
-				[&](const Chaos::FTriangle& Triangle, const int32 TriangleIndex, const int32 V0, const int32 V1, const int32 V2)
-				{
-					if (Candidates.Num() < MaximumTrianglesPerNode * 4)
-						AddTriangle(ObjectToken, ShapeIndex, TriangleIndex, V0, V1, V2,
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[0]))),
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[1]))),
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[2]))),
-							CableSim::ECollisionGeometryType::TriangleMesh, Candidates);
-				});
-			AppendNearestTriangles(Candidates, QueryBounds, OutGeometry.Triangles);
-			return true;
+			Geometry->GetObjectChecked<Chaos::FTriangleMeshImplicitObject>()
+				.VisitTriangles(LocalBounds, Chaos::FRigidTransform3::Identity, VisitTriangle);
 		}
-		if (Type == Chaos::ImplicitObjectType::HeightField)
+		else
 		{
-			const auto& HeightField = Geometry->GetObjectChecked<Chaos::FHeightField>();
-			TArray<CableSim::FCollisionTriangle> Candidates;
-			Candidates.Reserve(MaximumTrianglesPerNode * 4);
-			HeightField.VisitTriangles(LocalBounds, Chaos::FRigidTransform3::Identity,
-				[&](const Chaos::FTriangle& Triangle, const int32 TriangleIndex, const int32 V0, const int32 V1, const int32 V2)
-				{
-					if (Candidates.Num() < MaximumTrianglesPerNode * 4)
-						AddTriangle(ObjectToken, ShapeIndex, TriangleIndex, V0, V1, V2,
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[0]))),
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[1]))),
-							FVector3d(LocalToWorld.TransformPosition(FVector(Triangle[2]))),
-							CableSim::ECollisionGeometryType::HeightField, Candidates);
-				});
-			AppendNearestTriangles(Candidates, QueryBounds, OutGeometry.Triangles);
-			return true;
+			Geometry->GetObjectChecked<Chaos::FHeightField>()
+				.VisitTriangles(LocalBounds, Chaos::FRigidTransform3::Identity, VisitTriangle);
 		}
-		return false;
+		if (Candidates.Num() >= CandidateCap)
+		{
+			Diagnostics.bFeatureBudgetExceeded = true;
+		}
+		if (Candidates.IsEmpty())
+		{
+			return false;
+		}
+		TArray<FBox> CandidateBounds;
+		CandidateBounds.Reserve(Candidates.Num());
+		for (const CableSim::FCollisionTriangle& Triangle : Candidates) CandidateBounds.Add(TriangleBounds(Triangle));
+
+		for (const int32 NodeIndex : IntersectingNodeIndices)
+		{
+			FCableSimNodeCollisionGeometry& Node = Nodes[NodeIndex];
+			TArray<CableSim::FCollisionTriangle> NodeCandidates;
+			for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
+			{
+				if (CandidateBounds[CandidateIndex].Intersect(Node.PredictedBounds))
+				{
+					NodeCandidates.Add(Candidates[CandidateIndex]);
+				}
+			}
+			AppendNearestTriangles(NodeCandidates, Node.PredictedBounds, Node.Triangles);
+			if (Node.Triangles.Num() >= MaximumTrianglesPerNode)
+			{
+				Diagnostics.bFeatureBudgetExceeded = true;
+			}
+		}
+		return true;
 	}
 
 	FVector3d ClosestPointOnTriangle(const FVector3d& Point, const CableSim::FCollisionTriangle& Triangle)
@@ -586,34 +665,57 @@ bool FCableSimWorldCollisionProvider::GatherSnapshot(
 				Motion.CentreOfMass = FVector3d(Interface.GetWorldCoM(Handle));
 				Motion.LinearVelocity = FVector3d(Interface.GetV(Handle));
 				Motion.AngularVelocity = FVector3d(Interface.GetW(Handle));
+				const double Speed = Motion.LinearVelocity.Length();
+				OutSnapshot.Diagnostics.FastestColliderSpeed = FMath::Max(OutSnapshot.Diagnostics.FastestColliderSpeed, Speed);
+				if (Speed > Settings.MaximumDynamicColliderSpeed)
+				{
+					OutSnapshot.Diagnostics.bColliderExceededSpeedBudget = true;
+				}
 			}
 			Interface.VisitEveryShape(MakeArrayView(&Single, 1),
 				[&](const Chaos::FConstPhysicsObjectHandle, Chaos::TThreadShapeInstance<Chaos::EThreadContext::External>* Shape)
 				{
 					if (!Shape || !Shape->GetQueryEnabled() || !Intersects(Shape->GetWorldSpaceShapeBounds(), OutSnapshot.QueryBounds)) return false;
 					if (++OutSnapshot.Diagnostics.ShapeCount > MaximumShapes) { OutSnapshot.Diagnostics.bFeatureBudgetExceeded = true; return true; }
-					bool bIntersectedNode = false;
-					bool bSupported = false;
-					for (FCableSimNodeCollisionGeometry& Node : OutSnapshot.Nodes)
+					TArray<int32, TInlineAllocator<32>> IntersectingNodeIndices;
+					for (int32 NodeIndex = 0; NodeIndex < OutSnapshot.Nodes.Num(); ++NodeIndex)
 					{
-						if (!Intersects(Shape->GetWorldSpaceShapeBounds(), Node.PredictedBounds))
+						if (Intersects(Shape->GetWorldSpaceShapeBounds(), OutSnapshot.Nodes[NodeIndex].PredictedBounds))
 						{
-							continue;
-						}
-						bIntersectedNode = true;
-						bSupported |= AddGeometry(
-							Shape->GetGeometry(),
-							ObjectTransform,
-							Node.PredictedBounds,
-							Token,
-							Shape->GetShapeIndex(),
-							Node);
-						if (Node.Triangles.Num() >= MaximumTrianglesPerNode)
-						{
-							OutSnapshot.Diagnostics.bFeatureBudgetExceeded = true;
+							IntersectingNodeIndices.Add(NodeIndex);
 						}
 					}
-					if (bIntersectedNode && !bSupported) ++OutSnapshot.Diagnostics.UnsupportedShapeCount;
+					if (IntersectingNodeIndices.IsEmpty()) return false;
+
+					FTransform LocalToWorld = ObjectTransform;
+					FVector3d Scale;
+					const Chaos::FImplicitObject* Inner = UnwrapGeometry(Shape->GetGeometry(), LocalToWorld, Scale);
+					bool bSupported = false;
+					if (Inner)
+					{
+						LocalToWorld.SetScale3D(FVector(Scale));
+						const Chaos::EImplicitObjectType Type = Chaos::GetInnerType(Inner->GetType());
+						if (Type == Chaos::ImplicitObjectType::TriangleMesh || Type == Chaos::ImplicitObjectType::HeightField)
+						{
+							bSupported = AddSharedMeshGeometry(
+								Inner, Type, LocalToWorld, Token, Shape->GetShapeIndex(),
+								OutSnapshot.QueryBounds, Shape->GetWorldSpaceShapeBounds(),
+								IntersectingNodeIndices, OutSnapshot.Nodes, OutSnapshot.Diagnostics);
+						}
+						else
+						{
+							for (const int32 NodeIndex : IntersectingNodeIndices)
+							{
+								FCableSimNodeCollisionGeometry& Node = OutSnapshot.Nodes[NodeIndex];
+								bSupported |= AddGeometry(Inner, Type, LocalToWorld, Scale, Token, Shape->GetShapeIndex(), Node);
+								if (Node.Triangles.Num() >= MaximumTrianglesPerNode)
+								{
+									OutSnapshot.Diagnostics.bFeatureBudgetExceeded = true;
+								}
+							}
+						}
+					}
+					if (!bSupported) ++OutSnapshot.Diagnostics.UnsupportedShapeCount;
 					return false;
 				});
 			if (OutSnapshot.Diagnostics.ShapeCount > MaximumShapes) break;
@@ -893,9 +995,10 @@ void FCableSimWorldCollisionProvider::CompileContacts(
 			Candidate.Contact.ParticleA = SegmentIndex;
 			Candidate.Contact.ParticleB = SegmentIndex + 1;
 			Candidate.Contact.SegmentAlpha = FMath::Clamp(Alpha, 0.0, 1.0);
-			// Segment friction needs a material-point anchor, rather than either
-			// endpoint anchor. Leave it to the adjacent node contacts for now.
-			Candidate.Contact.bEnableFriction = false;
+			// FrictionAnchor below is already the barycentric material point (not
+			// either endpoint), so ProjectSegmentFriction can split the correction
+			// across both particles by that same barycentric weight.
+			Candidate.Contact.bEnableFriction = FrictionSettings.bEnableFriction;
 			return &Candidate;
 		};
 

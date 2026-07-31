@@ -11,8 +11,7 @@ namespace CableSimTests
 	{
 		CableSim::FSimulationConfig Config;
 		Config.Length = 100.0;
-		Config.SegmentLength = 10.0;
-		Config.MaximumParticles = 128;
+		Config.SegmentCount = 10;
 		Config.LinearDensity = 0.01;
 		Config.Gravity = FVector3d::ZeroVector;
 		Config.VelocityDamping = 0.0;
@@ -79,13 +78,14 @@ bool FCableSimUniformInitializationTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimEndpointLengthFlowTest,
-	"CableSim.Core.Dynamic.EndpointLengthFlowPreservesState",
+	FCableSimLengthChangeTest,
+	"CableSim.Core.Dynamic.LengthChangeIsExactAndInstant",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FCableSimEndpointLengthFlowTest::RunTest(const FString& Parameters)
+bool FCableSimLengthChangeTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSolver Solver;
+	// SegmentCount=10 from MakeConfig(): 11 particles, uniform 10cm material spacing.
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	TestTrue(TEXT("Initialize"), Solver.Initialize(
 		FVector3d::ZeroVector,
@@ -97,20 +97,26 @@ bool FCableSimEndpointLengthFlowTest::RunTest(const FString& Parameters)
 	Shaped.Particles[5].Velocity.Y = 120.0;
 	TestTrue(TEXT("Restore shaped state"), Solver.RestoreState(Shaped));
 
-	const FVector3d StartBefore = Solver.GetParticles()[0].Position;
-	const FVector3d EndBefore = Solver.GetParticles().Last().Position;
-	TestTrue(TEXT("Pay out at the end"), Solver.SetActiveLength(125.0, CableSim::ELengthChangeOrigin::End));
-	TestTrue(TEXT("Absolute active length grows"), FMath::IsNearlyEqual(Solver.GetActiveLength(), 125.0, 1.e-6));
-	TestTrue(TEXT("Start endpoint state is preserved"), Solver.GetParticles()[0].Position.Equals(StartBefore, 1.e-9));
-	TestTrue(TEXT("End endpoint state is preserved"), Solver.GetParticles().Last().Position.Equals(EndBefore, 1.e-9));
-	TestTrue(TEXT("Local payout inserts only the required samples"), Solver.GetParticles().Num() > Shaped.Particles.Num());
-	TestTrue(TEXT("The shaped material survives local payout"), Solver.SamplePosition(50.0).Y > 19.9);
+	const int32 ParticleCountBefore = Solver.GetParticles().Num();
+	const FVector3d ShapedPositionBefore = Solver.GetParticles()[5].Position;
+	const FVector3d ShapedVelocityBefore = Solver.GetParticles()[5].Velocity;
 
-	TestTrue(TEXT("Reel from the start"), Solver.SetActiveLength(75.0, CableSim::ELengthChangeOrigin::Start));
-	TestTrue(TEXT("Absolute active length shrinks"), FMath::IsNearlyEqual(Solver.GetActiveLength(), 75.0, 1.e-6));
-	TestTrue(TEXT("Both world endpoints remain continuous while reeling"),
-		Solver.GetParticles()[0].Position.Equals(StartBefore, 1.e-9)
-		&& Solver.GetParticles().Last().Position.Equals(EndBefore, 1.e-9));
+	// Particle 5 of 11 (SegmentCount=10) starts at material coordinate 50.0.
+	TestTrue(TEXT("Set a longer length"), Solver.SetActiveLength(125.0));
+	TestTrue(TEXT("Active length applies exactly, with no rate limit"),
+		FMath::IsNearlyEqual(Solver.GetActiveLength(), 125.0, 1.e-6));
+	TestEqual(TEXT("Segment count is fixed: length changes never insert or remove particles"),
+		Solver.GetParticles().Num(), ParticleCountBefore);
+	TestTrue(TEXT("A length change only rescales material coordinates, not world shape"),
+		Solver.GetParticles()[5].Position.Equals(ShapedPositionBefore, 1.e-9)
+		&& Solver.GetParticles()[5].Velocity.Equals(ShapedVelocityBefore, 1.e-9));
+	TestTrue(TEXT("Material coordinates rescale proportionally (50.0 * 125/100 = 62.5)"),
+		FMath::IsNearlyEqual(Solver.GetParticles()[5].MaterialCoordinate, 62.5, 1.e-6));
+
+	TestTrue(TEXT("Set a shorter length"), Solver.SetActiveLength(75.0));
+	TestTrue(TEXT("Active length shrinks exactly"), FMath::IsNearlyEqual(Solver.GetActiveLength(), 75.0, 1.e-6));
+	TestEqual(TEXT("Segment count remains fixed while reeling in"),
+		Solver.GetParticles().Num(), ParticleCountBefore);
 	double TotalMass = 0.0;
 	for (const CableSim::FParticle& Particle : Solver.GetParticles()) TotalMass += Particle.Mass;
 	TestTrue(TEXT("Mass follows the current material length"),
@@ -127,7 +133,7 @@ bool FCableSimMomentumConservingBendTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	Config.Length = 20.0;
-	Config.SegmentLength = 10.0;
+	Config.SegmentCount = 2;
 	Config.BendStrength = 1.0;
 	CableSim::FSolver Solver;
 	Solver.Initialize(FVector3d(-10.0, 0.0, 0.0), FVector3d(10.0, 0.0, 0.0), Config);
@@ -152,7 +158,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCableSimBarycentricContactTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
-	Config.SegmentLength = 100.0;
+	Config.SegmentCount = 1;
 	CableSim::FSolver Solver;
 	Solver.Initialize(FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0), Config);
 	CableSim::FContactConstraint Contact;
@@ -179,7 +185,7 @@ bool FCableSimRestingPlaneTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	Config.Length = 10.0;
-	Config.SegmentLength = 10.0;
+	Config.SegmentCount = 1;
 	Config.Gravity = FVector3d(0.0, 0.0, -980.665);
 	Config.VelocityDamping = 0.01;
 	CableSim::FSolver Solver;
@@ -262,8 +268,7 @@ bool FCableSimLongCableMultigridTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	Config.Length = 3000.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 512;
+	Config.SegmentCount = 300;
 	Config.MultigridIterations = 2;
 	Config.MultigridMinimumParticles = 64;
 	Config.SolverIterations = 64;
@@ -321,7 +326,7 @@ bool FCableSimCapstanFrictionDepletesTensionTest::RunTest(const FString& Paramet
 	{
 		CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 		Config.Length = 40.0;
-		Config.SegmentLength = 10.0;
+		Config.SegmentCount = 4;
 		Config.Gravity = FVector3d(0.0, 0.0, -980.665);
 		Config.StaticFriction = StaticFriction;
 		CableSim::FSolver Solver;
@@ -381,8 +386,7 @@ bool FCableSimSuddenEndpointJumpTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	Config.Length = 3000.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 512;
+	Config.SegmentCount = 300;
 	Config.MultigridIterations = 2;
 	Config.MultigridMinimumParticles = 64;
 	Config.SolverIterations = 64;
@@ -435,8 +439,7 @@ bool FCableSimSustainedDragTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
 	Config.Length = 400.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 64;
+	Config.SegmentCount = 40;
 	CableSim::FSolver Solver;
 	const double Radius = 350.0;
 	TestTrue(TEXT("Initialize 4 m cable with 50cm slack"), Solver.Initialize(
@@ -472,6 +475,150 @@ bool FCableSimSustainedDragTest::RunTest(const FString& Parameters)
 		MaximumObservedStrain < 0.05);
 	TestTrue(TEXT("Dragged endpoint tracks its target exactly"),
 		FVector3d::Distance(Result.EndEndpoint.AcceptedPosition, Input.EndEndpoint.TargetPosition) < 0.01);
+	return true;
+}
+
+// A long, nearly-inextensible cable pinned to both ends and draped over a
+// sphere is the steady-state case that used to make SolveBatch's tail
+// convergence loop pay its full worst case (Particles.Num()*4, capped at 512)
+// every single frame once settled: distance and contact corrections never
+// stop mildly disagreeing at the sphere, so the pre-multigrid tail needed
+// ~410-420 flat Gauss-Seidel sweeps/step to hold strain under its 0.25%
+// threshold. Re-running multigrid each tail iteration cut that to ~17-40
+// while reaching the same strain. This guards the correctness side of that
+// fix; there is no automation-friendly way to assert the iteration count
+// itself without flaky wall-clock timing, so this pins convergence quality
+// instead, which the old flat-sweep-only tail could not sustain within budget
+// for a case this size.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimSustainedContactConflictTest,
+	"CableSim.Core.Dynamic.SustainedContactConflictConverges",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimSustainedContactConflictTest::RunTest(const FString& Parameters)
+{
+	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
+	Config.Length = 1050.0; // generous slack; the cable can comfortably drape over a small sphere
+	Config.SegmentCount = 105;
+	Config.Gravity = FVector3d(0.0, 0.0, -980.665);
+	Config.VelocityDamping = 0.01;
+	Config.SolverIterations = 64;
+	Config.MultigridIterations = 2;
+	Config.MultigridMinimumParticles = 64;
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Initialize slack 10m cable"), Solver.Initialize(
+		FVector3d::ZeroVector,
+		FVector3d(1000.0, 0.0, 0.0),
+		Config));
+	CableSim::FStepInput Input = CableSimTests::FreeInput();
+	Input.StartEndpoint.State = CableSim::EEndpointState::Fixed;
+	Input.StartEndpoint.TargetPosition = FVector3d::ZeroVector;
+	Input.EndEndpoint.State = CableSim::EEndpointState::Fixed;
+	Input.EndEndpoint.TargetPosition = FVector3d(1000.0, 0.0, 0.0);
+	const FVector3d SphereCentre(500.0, 0.0, -20.0);
+	const double CombinedRadius = 22.5;
+	CableSim::FStepResult Result;
+	for (int32 Step = 0; Step < 150; ++Step)
+	{
+		TArray<CableSim::FContactConstraint> Contacts;
+		for (int32 Index = 0; Index < Solver.GetParticles().Num(); ++Index)
+		{
+			const FVector3d Position = Solver.GetParticles()[Index].Position;
+			const FVector3d Radial = Position - SphereCentre;
+			if (Radial.Length() < CombinedRadius)
+			{
+				CableSim::FContactConstraint& Contact = Contacts.AddDefaulted_GetRef();
+				Contact.ParticleA = Index;
+				Contact.Normal = Radial.GetSafeNormal(1.0, FVector3d::UnitZ());
+				Contact.MinimumNormalCoordinate = FVector3d::DotProduct(SphereCentre, Contact.Normal) + CombinedRadius;
+				Contact.FrictionAnchor = Position;
+			}
+		}
+		Result = Solver.AdvanceStep(Input, Contacts);
+		TestEqual(TEXT("Every step stays numerically valid under sustained conflict"),
+			Result.Status, CableSim::ESimulationStatus::Ready);
+	}
+	AddInfo(FString::Printf(
+		TEXT("tail-conflict settle strain=%.6f penetration=%.6f"),
+		Result.MaximumSegmentStrain, Result.MaximumPenetration));
+	TestTrue(TEXT("Draped-over-contact strain settles near the tail loop's own convergence threshold"),
+		Result.MaximumSegmentStrain < 0.01);
+	TestTrue(TEXT("The sphere contact is fully resolved, not just tolerated"),
+		Result.MaximumPenetration < 0.01);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimSegmentFrictionResistsSlideTest,
+	"CableSim.Core.Dynamic.SegmentFrictionResistsSlide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimSegmentFrictionResistsSlideTest::RunTest(const FString& Parameters)
+{
+	// Segment (barycentric) contacts used to hard-disable friction entirely, so a
+	// cable resting on something narrower than the node spacing could slide
+	// across it frictionlessly. ProjectSegmentFriction fixes that by splitting
+	// the correction across both segment endpoints by barycentric weight. This
+	// compares a dragged, resting segment with and without friction: the
+	// contact point (segment 1-2's midpoint, held at alpha=0.5 so no particle
+	// sits on it directly) must lag the frictionless case's lateral slide.
+	auto BuildAndDrag = [](const double StaticFriction, const double DynamicFriction) -> CableSim::FSolver
+	{
+		CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
+		Config.Length = 55.0; // slack relative to the 40cm anchor chord, so the drag doesn't just go taut
+		Config.SegmentCount = 4; // 5 particles, same indexing as the taut case
+		Config.Gravity = FVector3d(0.0, 0.0, -980.665);
+		Config.VelocityDamping = 0.01;
+		Config.StaticFriction = StaticFriction;
+		Config.DynamicFriction = DynamicFriction;
+		Config.StaticFrictionDeadZone = 0.05;
+		CableSim::FSolver Solver;
+		Solver.Initialize(FVector3d::ZeroVector, FVector3d(40.0, 0.0, 0.0), Config);
+		CableSim::FStepInput Input = CableSimTests::FreeInput();
+		Input.StartEndpoint.State = CableSim::EEndpointState::Fixed;
+		Input.StartEndpoint.TargetPosition = FVector3d::ZeroVector;
+		Input.EndEndpoint.State = CableSim::EEndpointState::Fixed;
+		const double LateralSpeed = 20.0; // cm/s: slow, steady drag, not a yank
+		for (int32 Step = 0; Step < 90; ++Step)
+		{
+			Input.EndEndpoint.TargetPosition = FVector3d(40.0, LateralSpeed * (Step + 1) * Input.DeltaTime, 0.0);
+			CableSim::FContactConstraint Contact;
+			Contact.ParticleA = 1;
+			Contact.ParticleB = 2;
+			Contact.SegmentAlpha = 0.5;
+			Contact.Normal = FVector3d::UnitZ();
+			Contact.MinimumNormalCoordinate = -5.0;
+			Contact.bEnableFriction = true;
+			// Matches production: the anchor is this step's starting contact point
+			// (WorldCollisionProvider sets it from the surface's previous-step
+			// position), so friction resists slip within the step, not cumulative
+			// drift across the whole run.
+			Contact.FrictionAnchor = 0.5 * (Solver.GetParticles()[1].Position + Solver.GetParticles()[2].Position);
+			Solver.AdvanceStep(Input, MakeArrayView(&Contact, 1));
+		}
+		return Solver;
+	};
+
+	CableSim::FSolver Frictionless = BuildAndDrag(0.0, 0.0);
+	CableSim::FSolver Frictional = BuildAndDrag(1.5, 1.0);
+
+	const double FrictionlessSlideY = 0.5
+		* (Frictionless.GetParticles()[1].Position.Y + Frictionless.GetParticles()[2].Position.Y);
+	const double FrictionalSlideY = 0.5
+		* (Frictional.GetParticles()[1].Position.Y + Frictional.GetParticles()[2].Position.Y);
+	AddInfo(FString::Printf(
+		TEXT("segment friction slide frictionless=%.4f frictional=%.4f status=%d/%d"),
+		FrictionlessSlideY, FrictionalSlideY,
+		static_cast<int32>(Frictionless.GetLastResult().Status),
+		static_cast<int32>(Frictional.GetLastResult().Status)));
+	TestEqual(TEXT("Frictionless run stays numerically valid"),
+		Frictionless.GetLastResult().Status, CableSim::ESimulationStatus::Ready);
+	TestEqual(TEXT("Frictional run stays numerically valid"),
+		Frictional.GetLastResult().Status, CableSim::ESimulationStatus::Ready);
+	TestTrue(TEXT("A resting contact still slides when undragged force overcomes it (sanity: the frictionless case actually moves)"),
+		FrictionlessSlideY > 1.0);
+	TestTrue(TEXT("Friction measurably resists the dragged segment contact's lateral slide"),
+		FrictionalSlideY < FrictionlessSlideY * 0.9);
 	return true;
 }
 

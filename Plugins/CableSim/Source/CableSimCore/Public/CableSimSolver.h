@@ -17,20 +17,12 @@ namespace CableSim
 		Driven
 	};
 
-	enum class ELengthChangeOrigin : uint8
-	{
-		Start,
-		End,
-		Both
-	};
-
 	enum class ESimulationStatus : uint8
 	{
 		Uninitialized,
 		Ready,
 		Overextended,
 		MovementLimited,
-		ParticleBudgetExceeded,
 		GeometryBudgetExceeded,
 		InvalidInitialOverlap,
 		CollisionRecoveryFailed,
@@ -38,12 +30,13 @@ namespace CableSim
 		NumericalFailure
 	};
 
+	// Corner regions are covered by the edges meeting there (closest-point tests
+	// clamp to their shared endpoint), so there is no separate Vertex feature.
 	enum class ECollisionFeatureType : uint8
 	{
 		None,
 		Face,
-		Edge,
-		Vertex
+		Edge
 	};
 
 	struct CABLESIMCORE_API FCollisionFeatureId
@@ -77,8 +70,8 @@ namespace CableSim
 	struct CABLESIMCORE_API FSimulationConfig
 	{
 		double Length = 400.0;
-		double SegmentLength = 10.0;
-		int32 MaximumParticles = 512;
+		/** Exact particle count is SegmentCount + 1; no derived/target node spacing. */
+		int32 SegmentCount = 40;
 		/** Physical cable density in kilograms per centimetre (0.005 = 0.5 kg/m). */
 		double LinearDensity = 0.005;
 		FVector3d Gravity = FVector3d(0.0, 0.0, -980.665);
@@ -180,8 +173,8 @@ namespace CableSim
 		bool Initialize(const FVector3d& Start, const FVector3d& End, const FSimulationConfig& Config);
 		void Reset();
 		bool ApplyConfig(const FSimulationConfig& Config);
-		bool SetActiveLength(double NewLength, ELengthChangeOrigin Origin);
-		bool RemeshPreservingState(double NewSegmentLength, int32 NewMaximumParticles);
+		bool SetActiveLength(double NewLength);
+		bool RemeshPreservingState(int32 NewSegmentCount);
 
 		bool BeginStep(const FStepInput& Input);
 		void SolveBatch(const FStepInput& Input, TArrayView<FContactConstraint> Contacts, int32 Iterations);
@@ -208,9 +201,6 @@ namespace CableSim
 		int32 GetEndpointIndex(EEndpoint Endpoint) const;
 		double EffectiveInverseMass(int32 ParticleIndex, const FStepInput& Input) const;
 		double SegmentRestLength(int32 SegmentIndex) const;
-		void AddLengthAtEndpoint(double Amount, EEndpoint Endpoint);
-		void RemoveLengthAtEndpoint(double Amount, EEndpoint Endpoint);
-		void NormalizeEndpointResolution(EEndpoint Endpoint);
 		void RecalculateParticleMasses();
 		void ProjectEndpointDrive(EEndpoint Endpoint, const FEndpointInput& EndpointInput, double DeltaTime);
 		void ProjectDistance(int32 SegmentIndex, const FStepInput& Input);
@@ -219,6 +209,7 @@ namespace CableSim
 		void ProjectBend(int32 FirstIndex, const FStepInput& Input, double PerIterationStrength);
 		double ProjectContact(FContactConstraint& Contact, const FStepInput& Input);
 		void ProjectParticleFriction(int32 ParticleIndex, TConstArrayView<FContactConstraint> Contacts, const FStepInput& Input);
+		void ProjectSegmentFriction(FContactConstraint& Contact, const FStepInput& Input);
 		void ApplyContactVelocityResponse(
 			TConstArrayView<FContactConstraint> Contacts,
 			const FStepInput& Input,

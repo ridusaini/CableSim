@@ -19,14 +19,6 @@ enum class ECableSimEndpointState : uint8
 };
 
 UENUM(BlueprintType)
-enum class ECableSimLengthChangeOrigin : uint8
-{
-	Start,
-	End,
-	Both
-};
-
-UENUM(BlueprintType)
 enum class ECableSimTargetSpace : uint8
 {
 	CableLocal,
@@ -53,7 +45,6 @@ enum class ECableSimSimulationStatus : uint8
 	Overextended,
 	MotionClamped,
 	MovementLimited,
-	ParticleBudgetExceeded,
 	CollisionBudgetExceeded,
 	InvalidInitialOverlap,
 	CollisionRecoveryFailed,
@@ -102,14 +93,9 @@ struct CABLESIMRUNTIME_API FCableSimSimulationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", Units = "cm"))
 	double RestLength = 400.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2.0", Units = "cm"))
-	double NodeSpacing = 10.0;
-
-	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Uniform particles replace contact-time refinement"))
-	double ContactRefinementLength = 5.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2", ClampMax = "4096"))
-	int32 MaximumParticles = 512;
+	/** Exact particle count is SegmentCount + 1. No target node spacing: this is the only resolution control. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "4095"))
+	int32 SegmentCount = 40;
 
 	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use LinearDensity"))
 	double ParticleMass = 0.05;
@@ -120,15 +106,6 @@ struct CABLESIMRUNTIME_API FCableSimSimulationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "1.0", Units = "cm"))
 	double MaximumLength = 3000.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "0.0", Units = "cm/s"))
-	double PayoutSpeed = 100.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length", meta = (ClampMin = "0.0", Units = "cm/s"))
-	double ReelSpeed = 100.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable|Length")
-	ECableSimLengthChangeOrigin LengthChangeOrigin = ECableSimLengthChangeOrigin::End;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	FVector Gravity = FVector(0.0, 0.0, -980.665);
 
@@ -137,9 +114,6 @@ struct CABLESIMRUNTIME_API FCableSimSimulationSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))
 	double DistanceCompliance = 0.0;
-
-	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use BendStrength and FreeBendDegreesPerMeter"))
-	double BendCompliance = 0.02;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1.0", ClampMax = "1.1"))
 	double DistanceRelaxation = 1.015;
@@ -379,21 +353,22 @@ struct CABLESIMRUNTIME_API FCableSimStatus
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
 	bool bCollisionDegraded = false;
 
+	/** True when a dynamic collider's measured speed exceeded CollisionSettings.MaximumDynamicColliderSpeed
+	 * this frame: the broadphase query bounds are only padded to assume that speed, so a faster mover can
+	 * cross them unnoticed within a single step. Raise MaximumDynamicColliderSpeed, or slow the collider. */
+	UPROPERTY(BlueprintReadOnly, Category = "Cable")
+	bool bFastColliderDetected = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm/s"))
+	double FastestColliderSpeed = 0.0;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double ActiveLength = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double TargetLength = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double MaximumLength = 0.0;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	ECableSimLengthChangeOrigin LengthChangeOrigin = ECableSimLengthChangeOrigin::End;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable")
-	bool bLengthChanging = false;
-
+	/** True when the last SetCableLength request was clamped against MaximumLength. */
 	UPROPERTY(BlueprintReadOnly, Category = "Cable")
 	bool bLengthClamped = false;
 
@@ -470,20 +445,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
 	FCableSimStatus GetSimulationStatus() const;
 
+	/** Applies exactly and immediately on the next step; no gradual feed. Returns the accepted (clamped) length. */
 	UFUNCTION(BlueprintCallable, Category = "Cable|Length")
-	double SetTargetCableLength(double NewLength, ECableSimLengthChangeOrigin Origin);
+	double SetCableLength(double NewLength);
 
+	UFUNCTION(BlueprintPure, Category = "Cable|Length")
+	double GetCableLength() const;
+
+	/** Applies exactly and immediately on the next step, redistributing existing particles to preserve shape. Returns the accepted (clamped) count. */
 	UFUNCTION(BlueprintCallable, Category = "Cable|Length")
-	void StopLengthChange();
+	int32 SetCableSegmentCount(int32 NewSegmentCount);
 
 	UFUNCTION(BlueprintPure, Category = "Cable|Length")
-	double GetActiveCableLength() const;
-
-	UFUNCTION(BlueprintPure, Category = "Cable|Length")
-	double GetTargetCableLength() const;
-
-	UFUNCTION(BlueprintPure, Category = "Cable|Length")
-	bool IsLengthChanging() const;
+	int32 GetCableSegmentCount() const;
 
 	/** Writes the complete current solver/collision frame to Saved/CableSimDumps. */
 	UFUNCTION(BlueprintCallable, Category = "Cable|Debug")

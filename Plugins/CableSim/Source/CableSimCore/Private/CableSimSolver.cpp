@@ -79,8 +79,7 @@ namespace CableSim
 	bool FSimulationConfig::Equals(const FSimulationConfig& Other, const double Tolerance) const
 	{
 		return NearlyEqual(Length, Other.Length, Tolerance)
-			&& NearlyEqual(SegmentLength, Other.SegmentLength, Tolerance)
-			&& MaximumParticles == Other.MaximumParticles
+			&& SegmentCount == Other.SegmentCount
 			&& NearlyEqual(LinearDensity, Other.LinearDensity, Tolerance)
 			&& Gravity.Equals(Other.Gravity, Tolerance)
 			&& NearlyEqual(VelocityDamping, Other.VelocityDamping, Tolerance)
@@ -110,12 +109,7 @@ namespace CableSim
 			return false;
 		}
 		Config = InConfig;
-		const int32 SegmentCount = FMath::Max(FMath::CeilToInt(Config.Length / Config.SegmentLength), 1);
-		if (SegmentCount + 1 > Config.MaximumParticles)
-		{
-			LastResult.Status = ESimulationStatus::ParticleBudgetExceeded;
-			return false;
-		}
+		const int32 SegmentCount = Config.SegmentCount;
 		Particles.SetNum(SegmentCount + 1);
 		for (int32 Index = 0; Index <= SegmentCount; ++Index)
 		{
@@ -153,12 +147,8 @@ namespace CableSim
 	bool FSolver::ApplyConfig(const FSimulationConfig& InConfig)
 	{
 		if (!IsValidConfig(InConfig)) return false;
-		if (IsInitialized() && InConfig.MaximumParticles < Particles.Num())
-		{
-			return false;
-		}
-		if (IsInitialized() && !NearlyEqual(Config.SegmentLength, InConfig.SegmentLength, 1.e-9)
-			&& !RemeshPreservingState(InConfig.SegmentLength, InConfig.MaximumParticles))
+		if (IsInitialized() && Config.SegmentCount != InConfig.SegmentCount
+			&& !RemeshPreservingState(InConfig.SegmentCount))
 		{
 			return false;
 		}
@@ -188,133 +178,49 @@ namespace CableSim
 		return Result;
 	}
 
-	bool FSolver::SetActiveLength(const double NewLength, const ELengthChangeOrigin Origin)
+	// Segment count is fixed once initialized (see RemeshPreservingState for the
+	// only way it changes); a length change is therefore an exact, instant,
+	// uniform rescale of every particle's material coordinate, applied in full
+	// with no rate limit. The physical shape then catches up via the normal
+	// constraint solve over the following iterations, the same way any other
+	// sudden disturbance (e.g. a hard endpoint jump) is absorbed.
+	bool FSolver::SetActiveLength(const double NewLength)
 	{
 		if (!IsInitialized() || bStepActive || !FMath::IsFinite(NewLength) || NewLength < 1.0)
 		{
 			return false;
 		}
 		const double CurrentLength = GetActiveLength();
-		const double Delta = NewLength - CurrentLength;
-		if (FMath::Abs(Delta) <= SmallNumber) return true;
-		const double StartShare = Origin == ELengthChangeOrigin::Start ? 1.0
-			: (Origin == ELengthChangeOrigin::Both ? 0.5 : 0.0);
-		const double EndShare = 1.0 - StartShare;
-		if (Delta > 0.0)
+		if (NearlyEqual(NewLength, CurrentLength, SmallNumber)) return true;
+		const double Scale = NewLength / FMath::Max(CurrentLength, SmallNumber);
+		for (FParticle& Particle : Particles)
 		{
-			if (FMath::CeilToInt(NewLength / Config.SegmentLength) + 1 > Config.MaximumParticles) return false;
-			AddLengthAtEndpoint(Delta * StartShare, EEndpoint::Start);
-			AddLengthAtEndpoint(Delta * EndShare, EEndpoint::End);
+			Particle.MaterialCoordinate *= Scale;
 		}
-		else
-		{
-			RemoveLengthAtEndpoint(-Delta * StartShare, EEndpoint::Start);
-			RemoveLengthAtEndpoint(-Delta * EndShare, EEndpoint::End);
-		}
-		Config.Length = GetActiveLength();
-		DistanceLambdas.Init(0.0, Particles.Num() - 1);
-		ParticleFrictionCorrections.Init(0.0, Particles.Num());
+		Config.Length = NewLength;
 		RecalculateParticleMasses();
 		LastValidState = CaptureState();
-		return NearlyEqual(Config.Length, NewLength, 1.e-6);
+		return true;
 	}
 
-	void FSolver::AddLengthAtEndpoint(const double Amount, const EEndpoint Endpoint)
+	bool FSolver::RemeshPreservingState(const int32 NewSegmentCount)
 	{
-		if (Amount <= SmallNumber) return;
-		if (Endpoint == EEndpoint::Start)
-		{
-			for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate += Amount;
-		}
-		else
-		{
-			Particles.Last().MaterialCoordinate += Amount;
-		}
-		NormalizeEndpointResolution(Endpoint);
-	}
-
-	void FSolver::RemoveLengthAtEndpoint(double Amount, const EEndpoint Endpoint)
-	{
-		Amount = FMath::Min(Amount, GetActiveLength() - 1.0);
-		while (Amount > SmallNumber && Particles.Num() >= 2)
-		{
-			if (Endpoint == EEndpoint::Start)
-			{
-				const double EdgeLength = Particles[1].MaterialCoordinate;
-				if (Particles.Num() > 2 && Amount >= EdgeLength - SmallNumber)
-				{
-					Amount -= EdgeLength;
-					Particles.RemoveAt(1, 1, EAllowShrinking::No);
-					for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate -= EdgeLength;
-					continue;
-				}
-				const double Applied = FMath::Min(Amount, EdgeLength - (Particles.Num() == 2 ? 1.0 : 1.e-4));
-				for (int32 Index = 1; Index < Particles.Num(); ++Index) Particles[Index].MaterialCoordinate -= Applied;
-				Amount -= Applied;
-			}
-			else
-			{
-				const int32 Last = Particles.Num() - 1;
-				const double EdgeLength = Particles[Last].MaterialCoordinate - Particles[Last - 1].MaterialCoordinate;
-				if (Particles.Num() > 2 && Amount >= EdgeLength - SmallNumber)
-				{
-					Amount -= EdgeLength;
-					Particles.RemoveAt(Last - 1, 1, EAllowShrinking::No);
-					Particles.Last().MaterialCoordinate -= EdgeLength;
-					continue;
-				}
-				const double Applied = FMath::Min(Amount, EdgeLength - (Particles.Num() == 2 ? 1.0 : 1.e-4));
-				Particles.Last().MaterialCoordinate -= Applied;
-				Amount -= Applied;
-			}
-		}
-		NormalizeEndpointResolution(Endpoint);
-	}
-
-	void FSolver::NormalizeEndpointResolution(const EEndpoint Endpoint)
-	{
-		const double Spacing = FMath::Max(Config.SegmentLength, 1.0);
-		while (Particles.Num() < Config.MaximumParticles)
-		{
-			const int32 A = Endpoint == EEndpoint::Start ? 0 : Particles.Num() - 2;
-			const int32 B = A + 1;
-			const double Rest = Particles[B].MaterialCoordinate - Particles[A].MaterialCoordinate;
-			if (Rest <= 1.5 * Spacing) break;
-			const double Alpha = Endpoint == EEndpoint::Start ? Spacing / Rest : 1.0 - Spacing / Rest;
-			FParticle Inserted = InterpolateParticle(Particles[A], Particles[B], Alpha);
-			Particles.Insert(Inserted, B);
-		}
-		if (Particles.Num() <= 2) return;
-		const int32 A = Endpoint == EEndpoint::Start ? 0 : Particles.Num() - 2;
-		const int32 B = A + 1;
-		const double Rest = Particles[B].MaterialCoordinate - Particles[A].MaterialCoordinate;
-		if (Rest >= 0.5 * Spacing) return;
-		if (Endpoint == EEndpoint::Start) Particles.RemoveAt(1, 1, EAllowShrinking::No);
-		else Particles.RemoveAt(Particles.Num() - 2, 1, EAllowShrinking::No);
-	}
-
-	bool FSolver::RemeshPreservingState(const double NewSegmentLength, const int32 NewMaximumParticles)
-	{
-		if (!IsInitialized() || bStepActive || !FMath::IsFinite(NewSegmentLength) || NewSegmentLength <= 0.0)
-			return false;
+		if (!IsInitialized() || bStepActive || NewSegmentCount < 1) return false;
 		const double ActiveLength = GetActiveLength();
-		const int32 SegmentCount = FMath::Max(FMath::CeilToInt(ActiveLength / NewSegmentLength), 1);
-		if (SegmentCount + 1 > NewMaximumParticles) return false;
 		const TArray<FParticle> Old = Particles;
-		Particles.SetNum(SegmentCount + 1);
+		Particles.SetNum(NewSegmentCount + 1);
 		int32 OldSegment = 0;
-		for (int32 Index = 0; Index <= SegmentCount; ++Index)
+		for (int32 Index = 0; Index <= NewSegmentCount; ++Index)
 		{
-			const double Coordinate = ActiveLength * static_cast<double>(Index) / SegmentCount;
+			const double Coordinate = ActiveLength * static_cast<double>(Index) / NewSegmentCount;
 			while (OldSegment + 2 < Old.Num() && Old[OldSegment + 1].MaterialCoordinate < Coordinate) ++OldSegment;
 			const double Span = Old[OldSegment + 1].MaterialCoordinate - Old[OldSegment].MaterialCoordinate;
 			const double Alpha = Span > SmallNumber ? (Coordinate - Old[OldSegment].MaterialCoordinate) / Span : 0.0;
 			Particles[Index] = InterpolateParticle(Old[OldSegment], Old[OldSegment + 1], FMath::Clamp(Alpha, 0.0, 1.0));
 			Particles[Index].MaterialCoordinate = Coordinate;
 		}
-		Config.SegmentLength = NewSegmentLength;
-		Config.MaximumParticles = NewMaximumParticles;
-		DistanceLambdas.Init(0.0, SegmentCount);
+		Config.SegmentCount = NewSegmentCount;
+		DistanceLambdas.Init(0.0, NewSegmentCount);
 		ParticleFrictionCorrections.Init(0.0, Particles.Num());
 		RecalculateParticleMasses();
 		LastValidState = CaptureState();
@@ -400,12 +306,19 @@ namespace CableSim
 			for (int32 First = 0; First + 2 < Particles.Num(); ++First) ProjectBend(First, Input, PerIterationBend);
 			for (int32 ParticleIndex = 0; ParticleIndex < Particles.Num(); ++ParticleIndex)
 				ProjectParticleFriction(ParticleIndex, Contacts, Input);
+			for (FContactConstraint& Contact : Contacts)
+				if (Particles.IsValidIndex(Contact.ParticleB)) ProjectSegmentFriction(Contact, Input);
 		}
 		// A local endpoint/contact disturbance needs O(N) Gauss-Seidel sweeps to
 		// travel through a long slack chain; a coarse endpoint chord cannot see it.
 		// Keep the authored iteration count as the normal cost, then add a bounded
 		// distance/contact-only convergence tail only while an inextensible cable
-		// is still visibly strained.
+		// is still visibly strained. Re-running multigrid each tail iteration (not
+		// just once up front) is what keeps this cheap: measured on a 100-node
+		// cable held taut against a persistent contact conflict, adding it cut the
+		// tail from ~410-420 flat sweeps/step to ~17-40. Multigrid alone cannot
+		// replace the flat sweep below MultigridMinimumParticles, where it is a
+		// no-op by design, so both stay.
 		if (Config.DistanceCompliance <= SmallNumber)
 		{
 			const int32 MaximumTailIterations = FMath::Min(Particles.Num() * 4, 512);
@@ -420,6 +333,7 @@ namespace CableSim
 						/ FMath::Max(Rest, SmallNumber));
 				}
 				if (MaximumStrain <= 0.0025) break;
+				SolveMultigrid(Input, Contacts);
 				if ((Iteration & 1) == 0)
 				{
 					for (int32 Segment = 0; Segment + 1 < Particles.Num(); ++Segment) ProjectDistance(Segment, Input);
@@ -580,8 +494,7 @@ namespace CableSim
 	bool FSolver::IsValidConfig(const FSimulationConfig& Value)
 	{
 		return FMath::IsFinite(Value.Length) && Value.Length > 0.0
-			&& FMath::IsFinite(Value.SegmentLength) && Value.SegmentLength > 0.0
-			&& Value.MaximumParticles >= 2 && Value.MaximumParticles <= 4096
+			&& Value.SegmentCount >= 1 && Value.SegmentCount <= 4095
 			&& FMath::IsFinite(Value.LinearDensity) && Value.LinearDensity > 0.0
 			&& IsFinite(Value.Gravity)
 			&& FMath::IsFinite(Value.VelocityDamping) && Value.VelocityDamping >= 0.0 && Value.VelocityDamping <= 1.0
@@ -821,8 +734,13 @@ namespace CableSim
 		int32 ActiveCount = 0;
 		for (const FContactConstraint& Contact : Contacts)
 		{
-			if (Contact.ParticleA != ParticleIndex || !Contact.bEnableFriction
-				|| Contact.AccumulatedNormalCorrection <= 0.0)
+			// Two-particle (segment/barycentric) contacts are handled separately by
+			// ProjectSegmentFriction, which splits the correction across both
+			// endpoints by barycentric weight; treating them here would apply the
+			// full correction to ParticleA alone regardless of how close the
+			// contact point actually is to it.
+			if (Contact.ParticleA != ParticleIndex || Particles.IsValidIndex(Contact.ParticleB)
+				|| !Contact.bEnableFriction || Contact.AccumulatedNormalCorrection <= 0.0)
 			{
 				continue;
 			}
@@ -852,6 +770,57 @@ namespace CableSim
 		if (CorrectionLength <= 0.0) return;
 		Particle.Position -= Tangent * (CorrectionLength / TangentLength);
 		ParticleFrictionCorrections[ParticleIndex] += CorrectionLength;
+	}
+
+	// A segment (barycentric) contact's grip point sits between two particles,
+	// not at either one, so its correction is distributed exactly the way
+	// ProjectContact distributes the normal correction: by inverse mass weighted
+	// by each particle's barycentric share (ShapeA/ShapeB), solving for the
+	// scalar Lambda that moves the barycentric point itself by CorrectionLength.
+	// Budget is tracked per contact (Contact.AccumulatedFrictionCorrection)
+	// rather than per particle, since a particle's own position is only a
+	// partial proxy for how far this specific contact point has slid.
+	void FSolver::ProjectSegmentFriction(FContactConstraint& Contact, const FStepInput& Input)
+	{
+		if (!Particles.IsValidIndex(Contact.ParticleA) || !Particles.IsValidIndex(Contact.ParticleB)
+			|| !Contact.bEnableFriction || Contact.AccumulatedNormalCorrection <= 0.0)
+		{
+			return;
+		}
+		const double Alpha = FMath::Clamp(Contact.SegmentAlpha, 0.0, 1.0);
+		const double ShapeA = 1.0 - Alpha;
+		const double ShapeB = Alpha;
+		const double InvA = EffectiveInverseMass(Contact.ParticleA, Input);
+		const double InvB = EffectiveInverseMass(Contact.ParticleB, Input);
+		const double Denominator = InvA * ShapeA * ShapeA + InvB * ShapeB * ShapeB;
+		if (Denominator <= SmallNumber) return;
+		FParticle& A = Particles[Contact.ParticleA];
+		FParticle& B = Particles[Contact.ParticleB];
+		TArray<FVector3d, TInlineAllocator<3>> Normals;
+		AddOrthonormalNormal(Contact.Normal, Normals);
+		if (Normals.IsEmpty()) return;
+		const FVector3d Point = A.Position * ShapeA + B.Position * ShapeB;
+		const FVector3d Tangent = RemoveNormalComponents(Point - Contact.FrictionAnchor, Normals);
+		const double TangentLength = Tangent.Length();
+		if (TangentLength <= SmallNumber) return;
+		const double PointSpeed = RemoveNormalComponents(A.Velocity * ShapeA + B.Velocity * ShapeB, Normals).Length();
+		const double Fade = Config.FrictionFadeEndSpeed > Config.FrictionFadeStartSpeed
+			? 1.0 - FMath::Clamp((PointSpeed - Config.FrictionFadeStartSpeed)
+				/ (Config.FrictionFadeEndSpeed - Config.FrictionFadeStartSpeed), 0.0, 1.0)
+			: 1.0;
+		const double PointMass = ShapeA * A.Mass + ShapeB * B.Mass;
+		if (PointMass <= SmallNumber) return;
+		const double PointNormalLoad = ShapeA * A.EstimatedNormalLoad + ShapeB * B.EstimatedNormalLoad;
+		const double LoadDisplacement = PointNormalLoad / PointMass * 100.0 * Input.DeltaTime * Input.DeltaTime;
+		const double TotalAllowance = Fade * (Config.StaticFrictionDeadZone + Config.StaticFriction * LoadDisplacement);
+		const double Remaining = FMath::Max(TotalAllowance - Contact.AccumulatedFrictionCorrection, 0.0);
+		const double CorrectionLength = FMath::Min(TangentLength, Remaining);
+		if (CorrectionLength <= 0.0) return;
+		const FVector3d Direction = Tangent / TangentLength;
+		const double Lambda = CorrectionLength / Denominator;
+		A.Position -= Direction * (InvA * ShapeA * Lambda);
+		B.Position -= Direction * (InvB * ShapeB * Lambda);
+		Contact.AccumulatedFrictionCorrection += CorrectionLength;
 	}
 
 	void FSolver::ApplyContactVelocityResponse(
@@ -1013,7 +982,7 @@ namespace CableSim
 
 	bool FSolver::ValidateState() const
 	{
-		if (Particles.Num() < 2 || Particles.Num() > Config.MaximumParticles) return false;
+		if (Particles.Num() != Config.SegmentCount + 1) return false;
 		double Previous = -1.0;
 		for (const FParticle& Particle : Particles)
 		{

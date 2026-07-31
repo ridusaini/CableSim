@@ -187,9 +187,8 @@ namespace
 			{
 				Texts.Emplace(
 					FString::Printf(
-						TEXT("CableSim  length=%.1f -> %.1f / %.1f  particles=%d  contacts=%d  strain=%.3f  accepted=%.2f  %.2f ms%s%s"),
+						TEXT("CableSim  length=%.1f / %.1f  particles=%d  contacts=%d  strain=%.3f  accepted=%.2f  %.2f ms%s%s"),
 						Status.ActiveLength,
-						Status.TargetLength,
 						Status.MaximumLength,
 						Status.ParticleCount,
 						Status.ContactCount,
@@ -210,10 +209,13 @@ namespace
 						Status.ConvexEdgeCount,
 						Status.RejectedContactCount,
 						Status.bCollisionDegraded ? TEXT("  COLLISION DEGRADED") : TEXT(""),
-						Status.bLengthChanging ? TEXT("  LENGTH CHANGING") : TEXT(""),
+						Status.bFastColliderDetected
+							? *FString::Printf(TEXT("  FAST COLLIDER %.0f cm/s"), Status.FastestColliderSpeed)
+							: TEXT(""),
 						Status.bLengthClamped ? TEXT("  LENGTH CLAMPED") : TEXT("")),
 					FVector(Polyline[0]) + FVector(0.0, 0.0, 9.0),
-					Status.bCollisionDegraded ? FLinearColor::Red : FLinearColor(0.7f, 0.7f, 0.7f));
+					(Status.bCollisionDegraded || Status.bFastColliderDetected)
+						? FLinearColor::Red : FLinearColor(0.7f, 0.7f, 0.7f));
 			}
 		}
 
@@ -241,19 +243,6 @@ namespace
 		}
 	}
 
-	CableSim::ELengthChangeOrigin ToCoreLengthOrigin(const ECableSimLengthChangeOrigin Origin)
-	{
-		switch (Origin)
-		{
-		case ECableSimLengthChangeOrigin::Start:
-			return CableSim::ELengthChangeOrigin::Start;
-		case ECableSimLengthChangeOrigin::Both:
-			return CableSim::ELengthChangeOrigin::Both;
-		default:
-			return CableSim::ELengthChangeOrigin::End;
-		}
-	}
-
 	ECableSimSimulationStatus ToRuntimeStatus(const CableSim::ESimulationStatus Status)
 	{
 		switch (Status)
@@ -264,8 +253,6 @@ namespace
 			return ECableSimSimulationStatus::Overextended;
 		case CableSim::ESimulationStatus::MovementLimited:
 			return ECableSimSimulationStatus::MovementLimited;
-		case CableSim::ESimulationStatus::ParticleBudgetExceeded:
-			return ECableSimSimulationStatus::ParticleBudgetExceeded;
 		case CableSim::ESimulationStatus::GeometryBudgetExceeded:
 			return ECableSimSimulationStatus::CollisionBudgetExceeded;
 		case CableSim::ESimulationStatus::InvalidInitialOverlap:
@@ -296,9 +283,7 @@ namespace
 
 	double EffectiveMaximumCableLength(const FCableSimSimulationSettings& Simulation)
 	{
-		const double ParticleBudgetLength = FMath::Max(Simulation.NodeSpacing, 2.0)
-			* FMath::Max(FMath::Clamp(Simulation.MaximumParticles, 2, 4096) - 1, 1);
-		return FMath::Max(FMath::Min(Simulation.MaximumLength, ParticleBudgetLength), 1.0);
+		return FMath::Max(Simulation.MaximumLength, 1.0);
 	}
 
 	CableSim::FSimulationConfig BuildCoreConfig(
@@ -311,8 +296,7 @@ namespace
 			Simulation.RestLength,
 			1.0,
 			EffectiveMaximumCableLength(Simulation));
-		Config.SegmentLength = FMath::Max(Simulation.NodeSpacing, 2.0);
-		Config.MaximumParticles = FMath::Clamp(Simulation.MaximumParticles, 2, 4096);
+		Config.SegmentCount = FMath::Clamp(Simulation.SegmentCount, 1, 4095);
 		Config.LinearDensity = FMath::Max(Simulation.LinearDensity / 100.0, 1.e-9);
 		Config.Gravity = FVector3d(Simulation.Gravity);
 		Config.VelocityDamping = FMath::Clamp(Simulation.VelocityDamping, 0.0, 1.0);
@@ -357,7 +341,6 @@ struct FCableSimRuntimeState
 	bool bEndpointBindingValid[2] = {true, true};
 	double TargetLength = 400.0;
 	double LastObservedRestLength = 400.0;
-	ECableSimLengthChangeOrigin LengthOrigin = ECableSimLengthChangeOrigin::End;
 	bool bLengthClamped = false;
 	TArray<FVector3d> PreviousPositions;
 	TArray<FVector3d> CurrentPositions;
@@ -391,8 +374,11 @@ void UCableSimComponent::PostLoad()
 	if (ObjectVersion < static_cast<int32>(ECableSimObjectVersion::LinearDensity)
 		|| MaterialSettingsVersion < 1)
 	{
+		// Pre-LinearDensity assets never stored node spacing independent of this
+		// migration; 10cm was the historical default used at the time.
+		constexpr double HistoricalNodeSpacing = 10.0;
 		SimulationSettings.LinearDensity = FMath::Max(
-			SimulationSettings.ParticleMass * 100.0 / FMath::Max(SimulationSettings.NodeSpacing, 1.0),
+			SimulationSettings.ParticleMass * 100.0 / HistoricalNodeSpacing,
 			1.e-6);
 		MaterialSettingsVersion = 1;
 	}
@@ -446,7 +432,7 @@ void UCableSimComponent::TickComponent(
 	}
 	if (!FMath::IsNearlyEqual(SimulationSettings.RestLength, RuntimeState->LastObservedRestLength))
 	{
-		SetTargetCableLength(SimulationSettings.RestLength, SimulationSettings.LengthChangeOrigin);
+		SetCableLength(SimulationSettings.RestLength);
 		RuntimeState->LastObservedRestLength = SimulationSettings.RestLength;
 	}
 	CableSim::FSimulationConfig CurrentConfig = BuildCoreConfig(SimulationSettings, FrictionSettings, CollisionSettings);
@@ -546,7 +532,6 @@ void UCableSimComponent::ReinitializeSimulation()
 	RuntimeState->bInitialized = RuntimeState->Solver.Initialize(Start, End, RuntimeState->AppliedConfig);
 	RuntimeState->TargetLength = RuntimeState->AppliedConfig.Length;
 	RuntimeState->LastObservedRestLength = SimulationSettings.RestLength;
-	RuntimeState->LengthOrigin = SimulationSettings.LengthChangeOrigin;
 	RuntimeState->bLengthClamped = !FMath::IsNearlyEqual(RuntimeState->TargetLength, SimulationSettings.RestLength);
 	RuntimeState->LastValidEndpointTargets[0] = Start;
 	RuntimeState->LastValidEndpointTargets[1] = End;
@@ -566,9 +551,7 @@ void UCableSimComponent::ReinitializeSimulation()
 		: ECableSimSimulationStatus::InvalidConfiguration;
 	RuntimeState->Status.ParticleCount = RuntimeState->Solver.GetParticles().Num();
 	RuntimeState->Status.ActiveLength = RuntimeState->Solver.GetActiveLength();
-	RuntimeState->Status.TargetLength = RuntimeState->TargetLength;
 	RuntimeState->Status.MaximumLength = EffectiveMaximumCableLength(SimulationSettings);
-	RuntimeState->Status.LengthChangeOrigin = RuntimeState->LengthOrigin;
 	RuntimeState->Status.bLengthClamped = RuntimeState->bLengthClamped;
 	RuntimeState->Status.bBindingFailure = !RuntimeState->bEndpointBindingValid[0]
 		|| !RuntimeState->bEndpointBindingValid[1];
@@ -691,42 +674,52 @@ FCableSimStatus UCableSimComponent::GetSimulationStatus() const
 	return RuntimeState->Status;
 }
 
-double UCableSimComponent::SetTargetCableLength(
-	const double NewLength,
-	const ECableSimLengthChangeOrigin Origin)
+double UCableSimComponent::SetCableLength(const double NewLength)
 {
 	const double Maximum = EffectiveMaximumCableLength(SimulationSettings);
 	RuntimeState->TargetLength = FMath::Clamp(NewLength, 1.0, Maximum);
-	RuntimeState->LengthOrigin = Origin;
 	RuntimeState->bLengthClamped = !FMath::IsNearlyEqual(NewLength, RuntimeState->TargetLength);
 	SimulationSettings.RestLength = RuntimeState->TargetLength;
 	RuntimeState->LastObservedRestLength = RuntimeState->TargetLength;
 	return RuntimeState->TargetLength;
 }
 
-void UCableSimComponent::StopLengthChange()
-{
-	RuntimeState->TargetLength = GetActiveCableLength();
-	SimulationSettings.RestLength = RuntimeState->TargetLength;
-	RuntimeState->LastObservedRestLength = RuntimeState->TargetLength;
-}
-
-double UCableSimComponent::GetActiveCableLength() const
+double UCableSimComponent::GetCableLength() const
 {
 	return RuntimeState && RuntimeState->Solver.IsInitialized()
 		? RuntimeState->Solver.GetActiveLength()
 		: 0.0;
 }
 
-double UCableSimComponent::GetTargetCableLength() const
+int32 UCableSimComponent::SetCableSegmentCount(const int32 NewSegmentCount)
 {
-	return RuntimeState ? RuntimeState->TargetLength : 0.0;
+	const int32 Accepted = FMath::Clamp(NewSegmentCount, 1, 4095);
+	SimulationSettings.SegmentCount = Accepted;
+	if (RuntimeState && RuntimeState->Solver.IsInitialized())
+	{
+		CableSim::FSimulationConfig NextConfig = RuntimeState->Solver.GetConfig();
+		NextConfig.SegmentCount = Accepted;
+		if (RuntimeState->Solver.ApplyConfig(NextConfig))
+		{
+			RuntimeState->AppliedConfig = RuntimeState->Solver.GetConfig();
+			RuntimeState->CollisionSnapshot.Reset();
+			RuntimeState->PreviousPositions.Reset();
+			RuntimeState->CurrentPositions.Reset();
+			for (const CableSim::FParticle& Particle : RuntimeState->Solver.GetParticles())
+			{
+				RuntimeState->PreviousPositions.Add(Particle.Position);
+				RuntimeState->CurrentPositions.Add(Particle.Position);
+			}
+		}
+	}
+	return Accepted;
 }
 
-bool UCableSimComponent::IsLengthChanging() const
+int32 UCableSimComponent::GetCableSegmentCount() const
 {
 	return RuntimeState && RuntimeState->Solver.IsInitialized()
-		&& !FMath::IsNearlyEqual(RuntimeState->TargetLength, RuntimeState->Solver.GetActiveLength(), 1.e-4);
+		? RuntimeState->Solver.GetConfig().SegmentCount
+		: SimulationSettings.SegmentCount;
 }
 
 bool UCableSimComponent::ResolveEndpointTarget(
@@ -786,16 +779,13 @@ FString UCableSimComponent::WriteDebugFrameDump() const
 	FString Text;
 	Text.Reserve(65536);
 	Text += FString::Printf(
-		TEXT("step=%lld status=%d particles=%d contacts=%d active_length=%.9g target_length=%.9g maximum_length=%.9g length_origin=%d length_changing=%d length_clamped=%d binding_failure=%d strain=%.9g penetration=%.9g correction=%.9g tension=%.9g normal_load=%.9g accepted=%.9g degraded=%d\n"),
+		TEXT("step=%lld status=%d particles=%d contacts=%d active_length=%.9g maximum_length=%.9g length_clamped=%d binding_failure=%d strain=%.9g penetration=%.9g correction=%.9g tension=%.9g normal_load=%.9g accepted=%.9g degraded=%d\n"),
 		RuntimeState->Status.StepIndex,
 		static_cast<int32>(RuntimeState->Status.Status),
 		RuntimeState->Status.ParticleCount,
 		RuntimeState->Status.ContactCount,
 		RuntimeState->Status.ActiveLength,
-		RuntimeState->Status.TargetLength,
 		RuntimeState->Status.MaximumLength,
-		static_cast<int32>(RuntimeState->Status.LengthChangeOrigin),
-		RuntimeState->Status.bLengthChanging ? 1 : 0,
 		RuntimeState->Status.bLengthClamped ? 1 : 0,
 		RuntimeState->Status.bBindingFailure ? 1 : 0,
 		RuntimeState->Status.MaximumSegmentStrain,
@@ -913,21 +903,13 @@ void UCableSimComponent::PerformFixedStep(const double FrameAlpha)
 	}
 	const double OuterDeltaTime = FMath::Max(SimulationSettings.FixedTimeStep, 0.001);
 	const double ActiveLength = RuntimeState->Solver.GetActiveLength();
-	const double LengthDelta = RuntimeState->TargetLength - ActiveLength;
-	if (FMath::Abs(LengthDelta) > 1.e-4)
+	// Applied exactly and immediately, in full, the first step after a request:
+	// no feed rate, no multi-frame transition.
+	if (FMath::Abs(RuntimeState->TargetLength - ActiveLength) > 1.e-4)
 	{
-		const double Rate = LengthDelta > 0.0
-			? FMath::Max(SimulationSettings.PayoutSpeed, 0.0)
-			: FMath::Max(SimulationSettings.ReelSpeed, 0.0);
-		const double AppliedDelta = FMath::Clamp(LengthDelta, -Rate * OuterDeltaTime, Rate * OuterDeltaTime);
-		if (FMath::Abs(AppliedDelta) > 1.e-6)
-		{
-			const bool bChanged = RuntimeState->Solver.SetActiveLength(
-				ActiveLength + AppliedDelta,
-				ToCoreLengthOrigin(RuntimeState->LengthOrigin));
-			RuntimeState->bLengthClamped |= !bChanged;
-			RuntimeState->AppliedConfig = RuntimeState->Solver.GetConfig();
-		}
+		const bool bChanged = RuntimeState->Solver.SetActiveLength(RuntimeState->TargetLength);
+		RuntimeState->bLengthClamped |= !bChanged;
+		RuntimeState->AppliedConfig = RuntimeState->Solver.GetConfig();
 	}
 	FVector3d RequestedTargets[2] = {
 		FMath::Lerp(RuntimeState->LastFrameTargets[0], RuntimeState->CurrentFrameTargets[0], FrameAlpha),
@@ -1069,11 +1051,10 @@ void UCableSimComponent::PerformFixedStep(const double FrameAlpha)
 	RuntimeState->Status.bMotionClamped = false;
 	RuntimeState->Status.bCollisionDegraded = CollisionDiagnostics.bFeatureBudgetExceeded
 		|| CollisionDiagnostics.UnsupportedShapeCount > 0;
+	RuntimeState->Status.bFastColliderDetected = CollisionDiagnostics.bColliderExceededSpeedBudget;
+	RuntimeState->Status.FastestColliderSpeed = CollisionDiagnostics.FastestColliderSpeed;
 	RuntimeState->Status.ActiveLength = RuntimeState->Solver.GetActiveLength();
-	RuntimeState->Status.TargetLength = RuntimeState->TargetLength;
 	RuntimeState->Status.MaximumLength = EffectiveMaximumCableLength(SimulationSettings);
-	RuntimeState->Status.LengthChangeOrigin = RuntimeState->LengthOrigin;
-	RuntimeState->Status.bLengthChanging = IsLengthChanging();
 	RuntimeState->Status.bLengthClamped = RuntimeState->bLengthClamped;
 	RuntimeState->Status.bBindingFailure = !RuntimeState->bEndpointBindingValid[0]
 		|| !RuntimeState->bEndpointBindingValid[1];
@@ -1131,14 +1112,7 @@ void UCableSimComponent::RefreshEditorPreview()
 	};
 	const FVector3d Start = PreviewPosition(StartEndpoint);
 	const FVector3d End = PreviewPosition(EndEndpoint);
-	const double Length = FMath::Clamp(
-		SimulationSettings.RestLength,
-		1.0,
-		EffectiveMaximumCableLength(SimulationSettings));
-	const int32 Segments = FMath::Clamp(
-		FMath::CeilToInt(Length / FMath::Max(SimulationSettings.NodeSpacing, 1.0)),
-		1,
-		FMath::Max(SimulationSettings.MaximumParticles - 1, 1));
+	const int32 Segments = FMath::Clamp(SimulationSettings.SegmentCount, 1, 4095);
 	RuntimeState->PreviousPositions.Reset(Segments + 1);
 	RuntimeState->CurrentPositions.Reset(Segments + 1);
 	for (int32 Index = 0; Index <= Segments; ++Index)

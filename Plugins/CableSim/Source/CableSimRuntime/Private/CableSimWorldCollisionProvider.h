@@ -17,6 +17,12 @@ struct FCableSimCollisionDiagnostics
 	int32 RejectedContactCount = 0;
 	int32 UnsupportedShapeCount = 0;
 	bool bFeatureBudgetExceeded = false;
+	// Set when a movable object's measured velocity exceeds Settings.MaximumDynamicColliderSpeed,
+	// the speed the broadphase query bounds are padded to assume. A collider that actually moves
+	// faster can cross the cable's query bounds within a single step, unnoticed, so this is the
+	// only signal that the broadphase's own speed assumption was violated this frame.
+	bool bColliderExceededSpeedBudget = false;
+	double FastestColliderSpeed = 0.0;
 	double SnapshotMilliseconds = 0.0;
 	double CompileMilliseconds = 0.0;
 };

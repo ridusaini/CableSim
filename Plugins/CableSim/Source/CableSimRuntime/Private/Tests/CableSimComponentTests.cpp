@@ -37,7 +37,7 @@ bool FCableSimRuntimeSlackFallsTest::RunTest(const FString& Parameters)
 {
 	UCableSimComponent* Component = NewObject<UCableSimComponent>();
 	Component->SimulationSettings.RestLength = 400.0;
-	Component->SimulationSettings.NodeSpacing = 10.0;
+	Component->SimulationSettings.SegmentCount = 40;
 	Component->StartEndpoint.State = ECableSimEndpointState::Fixed;
 	Component->EndEndpoint.State = ECableSimEndpointState::Fixed;
 	Component->StartEndpoint.LocalTarget = FVector(-150.0, 0.0, 0.0);
@@ -68,7 +68,7 @@ bool FCableSimRuntimeSlackFallsTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimRuntimeLengthControllerTest,
-	"CableSim.Runtime.Dynamic.LengthControllerClampsAndRates",
+	"CableSim.Runtime.Dynamic.LengthAndSegmentCountApplyExactly",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCableSimRuntimeLengthControllerTest::RunTest(const FString& Parameters)
@@ -76,30 +76,33 @@ bool FCableSimRuntimeLengthControllerTest::RunTest(const FString& Parameters)
 	UCableSimComponent* Component = NewObject<UCableSimComponent>();
 	Component->CollisionSettings.bEnableWorldCollision = false;
 	Component->SimulationSettings.RestLength = 100.0;
-	Component->SimulationSettings.NodeSpacing = 10.0;
-	Component->SimulationSettings.MaximumParticles = 21;
+	Component->SimulationSettings.SegmentCount = 10;
 	Component->SimulationSettings.MaximumLength = 250.0;
-	Component->SimulationSettings.PayoutSpeed = 60.0;
 	Component->StartEndpoint.State = ECableSimEndpointState::Fixed;
 	Component->EndEndpoint.State = ECableSimEndpointState::Fixed;
 	Component->StartEndpoint.LocalTarget = FVector(-40.0, 0.0, 0.0);
 	Component->EndEndpoint.LocalTarget = FVector(40.0, 0.0, 0.0);
 	Component->ReinitializeSimulation();
 	TestTrue(TEXT("Initial active length is configured"),
-		FMath::IsNearlyEqual(Component->GetActiveCableLength(), 100.0, 1.e-6));
-	const double AcceptedTarget = Component->SetTargetCableLength(500.0, ECableSimLengthChangeOrigin::End);
-	TestTrue(TEXT("Target is clamped by both authored maximum and particle capacity"),
-		FMath::IsNearlyEqual(AcceptedTarget, 200.0, 1.e-6));
-	Component->StepSimulation(10);
-	TestTrue(TEXT("Payout advances at the authored rate"),
-		FMath::IsNearlyEqual(Component->GetActiveCableLength(), 110.0, 1.e-4));
-	const FCableSimStatus Status = Component->GetSimulationStatus();
-	TestTrue(TEXT("Length state is visible to gameplay"),
-		Status.bLengthChanging && Status.bLengthClamped
-		&& FMath::IsNearlyEqual(Status.TargetLength, 200.0, 1.e-6)
-		&& FMath::IsNearlyEqual(Status.MaximumLength, 200.0, 1.e-6));
-	Component->StopLengthChange();
-	TestFalse(TEXT("Stop captures the current material length"), Component->IsLengthChanging());
+		FMath::IsNearlyEqual(Component->GetCableLength(), 100.0, 1.e-6));
+	TestEqual(TEXT("Initial segment count is configured"), Component->GetCableSegmentCount(), 10);
+
+	const double AcceptedLength = Component->SetCableLength(500.0);
+	TestTrue(TEXT("Length is clamped to the authored maximum"),
+		FMath::IsNearlyEqual(AcceptedLength, 250.0, 1.e-6));
+	Component->StepSimulation(1);
+	TestTrue(TEXT("Length applies in full on the very next step: no gradual feed"),
+		FMath::IsNearlyEqual(Component->GetCableLength(), 250.0, 1.e-4));
+	TestEqual(TEXT("A length change never touches segment count"), Component->GetCableSegmentCount(), 10);
+	TestTrue(TEXT("Clamping is visible to gameplay"), Component->GetSimulationStatus().bLengthClamped);
+
+	const int32 AcceptedCount = Component->SetCableSegmentCount(20);
+	TestEqual(TEXT("Segment count applies exactly"), AcceptedCount, 20);
+	Component->StepSimulation(1);
+	TestEqual(TEXT("Particle count reflects the new segment count immediately"),
+		Component->GetCablePolyline().Num(), 21);
+	TestTrue(TEXT("A segment count change never touches length"),
+		FMath::IsNearlyEqual(Component->GetCableLength(), 250.0, 1.e-4));
 	return true;
 }
 
@@ -112,8 +115,7 @@ bool FCableSimClosedBoxRecoveryTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config;
 	Config.Length = 10.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 8;
+	Config.SegmentCount = 1;
 	Config.Gravity = FVector3d::ZeroVector;
 	Config.BendStrength = 0.0;
 	Config.StaticFriction = 0.0;
@@ -179,8 +181,7 @@ bool FCableSimBoxEdgeContactTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config;
 	Config.Length = 10.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 8;
+	Config.SegmentCount = 1;
 	Config.Gravity = FVector3d::ZeroVector;
 	Config.BendStrength = 0.0;
 	Config.StaticFriction = 0.0;
@@ -238,8 +239,7 @@ bool FCableSimSegmentPrimitiveContactTest::RunTest(const FString& Parameters)
 {
 	CableSim::FSimulationConfig Config;
 	Config.Length = 100.0;
-	Config.SegmentLength = 100.0;
-	Config.MaximumParticles = 8;
+	Config.SegmentCount = 1;
 	Config.Gravity = FVector3d::ZeroVector;
 	Config.BendStrength = 0.0;
 	Config.StaticFriction = 0.0;
@@ -295,8 +295,7 @@ bool FCableSimDrivenEndpointUnreachablePlaneTest::RunTest(const FString& Paramet
 {
 	CableSim::FSimulationConfig Config;
 	Config.Length = 10.0;
-	Config.SegmentLength = 10.0;
-	Config.MaximumParticles = 8;
+	Config.SegmentCount = 1;
 	Config.Gravity = FVector3d::ZeroVector;
 	Config.BendStrength = 0.0;
 	Config.StaticFriction = 0.0;
