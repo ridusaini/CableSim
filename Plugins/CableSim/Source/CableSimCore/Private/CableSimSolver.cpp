@@ -372,25 +372,6 @@ namespace CableSim
 		ApplyFixedEndpoint(EEndpoint::End, Input.EndEndpoint);
 		ProjectEndpointDrive(EEndpoint::Start, Input.StartEndpoint, Input.DeltaTime);
 		ProjectEndpointDrive(EEndpoint::End, Input.EndEndpoint, Input.DeltaTime);
-		// Transport endpoint keyframe motion through material space before the
-		// constraint solve. This is an initial guess, not a constraint: collision
-		// and dynamics still determine the final route. It prevents a long cable's
-		// entire endpoint displacement from appearing as a one-segment impulse.
-		const FVector3d StartMotion = Input.StartEndpoint.State != EEndpointState::Free
-			? Particles[0].Position - Particles[0].PreviousPosition
-			: FVector3d::ZeroVector;
-		const FVector3d EndMotion = Input.EndEndpoint.State != EEndpointState::Free
-			? Particles.Last().Position - Particles.Last().PreviousPosition
-			: FVector3d::ZeroVector;
-		const double ActiveLength = FMath::Max(GetActiveLength(), SmallNumber);
-		for (int32 Index = 1; Index + 1 < Particles.Num(); ++Index)
-		{
-			const double MaterialAlpha = FMath::Clamp(
-				Particles[Index].MaterialCoordinate / ActiveLength,
-				0.0,
-				1.0);
-			Particles[Index].Position += FMath::Lerp(StartMotion, EndMotion, MaterialAlpha);
-		}
 		DistanceLambdas.Init(0.0, Particles.Num() - 1);
 		ParticleFrictionCorrections.Init(0.0, Particles.Num());
 		bStepActive = true;

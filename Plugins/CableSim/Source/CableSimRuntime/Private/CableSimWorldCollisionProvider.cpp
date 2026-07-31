@@ -391,6 +391,43 @@ namespace
 		bool bMovable = false;
 		bool bInsideClosedConvex = false;
 	};
+
+	// A kinematic (Fixed or Driven) endpoint's rope-arc-length distance to a
+	// contact bounds how far that plane can possibly be: a plane farther than
+	// the reachable material arc can only be satisfied by stretching the rope,
+	// so it should be discarded rather than fought every iteration.
+	bool IsCollisionPlaneWithinKinematicReach(
+		const CableSim::FStepInput& Input,
+		const double ActiveLength,
+		const double Coordinate,
+		const CableSim::FContactConstraint& Contact,
+		const double Tolerance)
+	{
+		auto IsKinematic = [](const CableSim::EEndpointState State)
+		{
+			return State == CableSim::EEndpointState::Fixed || State == CableSim::EEndpointState::Driven;
+		};
+		double RelevantArcLength = TNumericLimits<double>::Max();
+		FVector3d RelevantKeyframe = FVector3d::ZeroVector;
+		if (IsKinematic(Input.StartEndpoint.State))
+		{
+			RelevantArcLength = Coordinate;
+			RelevantKeyframe = Input.StartEndpoint.TargetPosition;
+		}
+		const double ArcFromEnd = ActiveLength - Coordinate;
+		if (IsKinematic(Input.EndEndpoint.State) && ArcFromEnd < RelevantArcLength)
+		{
+			RelevantArcLength = ArcFromEnd;
+			RelevantKeyframe = Input.EndEndpoint.TargetPosition;
+		}
+		if (RelevantArcLength >= TNumericLimits<double>::Max())
+		{
+			return true;
+		}
+		const double PlaneDistance = FMath::Abs(
+			Contact.MinimumNormalCoordinate - FVector3d::DotProduct(RelevantKeyframe, Contact.Normal));
+		return PlaneDistance <= RelevantArcLength + Tolerance;
+	}
 }
 
 void FCableSimCollisionSnapshot::Reset()
@@ -617,16 +654,6 @@ void FCableSimWorldCollisionProvider::CompileContacts(
 		const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
 		for (int32 SampleIndex = 0; SampleIndex < Particles.Num(); ++SampleIndex)
 		{
-			// A fixed attachment is deliberately allowed to sit on/in its support.
-			// Adjacent segment contacts still make the rest of the cable collide;
-			// ignoring the attachment's whole actor would incorrectly remove that
-			// actor from collision everywhere along the cable.
-			if ((SampleIndex == 0 && Input.StartEndpoint.State == CableSim::EEndpointState::Fixed)
-				|| (SampleIndex + 1 == Particles.Num()
-					&& Input.EndEndpoint.State == CableSim::EEndpointState::Fixed))
-			{
-				continue;
-			}
 			if (!Snapshot.Nodes.IsValidIndex(SampleIndex)) continue;
 			const FCableSimNodeCollisionGeometry& NodeGeometry = Snapshot.Nodes[SampleIndex];
 		const double Coordinate = Particles[SampleIndex].MaterialCoordinate;
@@ -823,30 +850,8 @@ void FCableSimWorldCollisionProvider::CompileContacts(
 					break;
 				}
 			}
-			// Reject any plane that a hard keyframe cannot reach through the
-			// intervening material arc. This applies to static and moving shapes.
-			{
-				double RelevantArcLength = TNumericLimits<double>::Max();
-				FVector3d RelevantKeyframe = FVector3d::ZeroVector;
-				if (Input.StartEndpoint.State == CableSim::EEndpointState::Fixed)
-				{
-					RelevantArcLength = Coordinate;
-					RelevantKeyframe = Input.StartEndpoint.TargetPosition;
-				}
-				const double ArcFromEnd = Solver.GetActiveLength() - Coordinate;
-				if (Input.EndEndpoint.State == CableSim::EEndpointState::Fixed && ArcFromEnd < RelevantArcLength)
-				{
-					RelevantArcLength = ArcFromEnd;
-					RelevantKeyframe = Input.EndEndpoint.TargetPosition;
-				}
-				if (RelevantArcLength < TNumericLimits<double>::Max())
-				{
-					const double PlaneDistance = FMath::Abs(
-						Candidate.Contact.MinimumNormalCoordinate
-						- FVector3d::DotProduct(RelevantKeyframe, Candidate.Contact.Normal));
-					bReject |= PlaneDistance > RelevantArcLength + Tolerance;
-				}
-			}
+			bReject |= !IsCollisionPlaneWithinKinematicReach(
+				Input, Solver.GetActiveLength(), Coordinate, Candidate.Contact, Tolerance);
 			if ((!Candidate.bEdge && FaceCount >= FMath::Clamp(CollisionSettings.MaximumContactsPerElement, 1, 4))
 				|| (Candidate.bEdge && EdgeCount >= FMath::Clamp(CollisionSettings.MaximumEdgesPerElement, 1, 3))) bReject = true;
 			if (bReject)
@@ -1043,26 +1048,8 @@ void FCableSimWorldCollisionProvider::CompileContacts(
 				Particles[SegmentIndex].MaterialCoordinate,
 				Particles[SegmentIndex + 1].MaterialCoordinate,
 				Candidate.Contact.SegmentAlpha);
-			double RelevantArcLength = TNumericLimits<double>::Max();
-			FVector3d RelevantKeyframe = FVector3d::ZeroVector;
-			if (Input.StartEndpoint.State == CableSim::EEndpointState::Fixed)
-			{
-				RelevantArcLength = Coordinate;
-				RelevantKeyframe = Input.StartEndpoint.TargetPosition;
-			}
-			const double ArcFromEnd = Solver.GetActiveLength() - Coordinate;
-			if (Input.EndEndpoint.State == CableSim::EEndpointState::Fixed && ArcFromEnd < RelevantArcLength)
-			{
-				RelevantArcLength = ArcFromEnd;
-				RelevantKeyframe = Input.EndEndpoint.TargetPosition;
-			}
-			if (RelevantArcLength < TNumericLimits<double>::Max())
-			{
-				const double PlaneDistance = FMath::Abs(
-					Candidate.Contact.MinimumNormalCoordinate
-					- FVector3d::DotProduct(RelevantKeyframe, Candidate.Contact.Normal));
-				bReject |= PlaneDistance > RelevantArcLength + Tolerance;
-			}
+			bReject |= !IsCollisionPlaneWithinKinematicReach(
+				Input, Solver.GetActiveLength(), Coordinate, Candidate.Contact, Tolerance);
 			if ((!Candidate.bEdge && FaceCount >= FMath::Clamp(CollisionSettings.MaximumContactsPerElement, 1, 4))
 				|| (Candidate.bEdge && EdgeCount >= FMath::Clamp(CollisionSettings.MaximumEdgesPerElement, 1, 3)))
 			{

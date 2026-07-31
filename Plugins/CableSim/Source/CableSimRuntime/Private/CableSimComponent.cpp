@@ -25,13 +25,26 @@ namespace
 		static_cast<int32>(ECableSimObjectVersion::Latest),
 		TEXT("CableSimObjectVersion"));
 
+	FLinearColor CableSimRoleColor(const ECableSimEndpointState State, const FLinearColor& FreeColor)
+	{
+		switch (State)
+		{
+		case ECableSimEndpointState::Fixed: return FLinearColor::Red;
+		case ECableSimEndpointState::Driven: return FLinearColor(1.0f, 0.5f, 0.0f);
+		default: return FreeColor;
+		}
+	}
+
 	class FCableSimDebugProxy final : public FDebugRenderSceneProxy
 	{
 	public:
 		FCableSimDebugProxy(
 			const UPrimitiveComponent* Component,
 			const TConstArrayView<FVector3d> Polyline,
-			const TConstArrayView<FVector3d> ContactPoints,
+			const TConstArrayView<CableSim::FParticle> Particles,
+			const ECableSimEndpointState StartState,
+			const ECableSimEndpointState EndState,
+			const TConstArrayView<CableSim::FContactConstraint> Contacts,
 			const TConstArrayView<FVector3d> RejectedPoints,
 			const FCableSimCollisionSnapshot& CollisionSnapshot,
 			const FCableSimDebugSettings& Settings,
@@ -40,26 +53,83 @@ namespace
 		{
 			DrawType = EDrawType::WireMesh;
 			DrawAlpha = 255;
+			const double MaximumTension = FMath::Max(Status.MaximumEstimatedTension, UE_DOUBLE_KINDA_SMALL_NUMBER);
 			for (int32 Index = 0; Index + 1 < Polyline.Num(); ++Index)
 			{
+				FColor SegmentColor = Settings.CableColor.ToFColor(true);
+				if (Settings.bColorByTension && Particles.IsValidIndex(Index) && Particles.IsValidIndex(Index + 1))
+				{
+					const double Tension = 0.5 * (Particles[Index].EstimatedTension + Particles[Index + 1].EstimatedTension);
+					const double Alpha = FMath::Clamp(Tension / MaximumTension, 0.0, 1.0);
+					SegmentColor = FLinearColor::LerpUsingHSV(
+						FLinearColor(0.05f, 0.3f, 1.0f), FLinearColor(1.0f, 0.1f, 0.05f), Alpha).ToFColor(true);
+				}
 				Lines.Emplace(
 					FVector(Polyline[Index]),
 					FVector(Polyline[Index + 1]),
-					Settings.CableColor.ToFColor(true),
+					SegmentColor,
 					Settings.LineThickness);
 			}
 			if (Settings.bDrawParticles)
 			{
-				for (const FVector3d& Point : Polyline)
+				TArray<bool> bInContact;
+				bInContact.Init(false, Particles.Num());
+				for (const CableSim::FContactConstraint& Contact : Contacts)
 				{
-					Spheres.Emplace(1.25f, FVector(Point), Settings.CableColor);
+					if (bInContact.IsValidIndex(Contact.ParticleA)) bInContact[Contact.ParticleA] = true;
+					if (bInContact.IsValidIndex(Contact.ParticleB)) bInContact[Contact.ParticleB] = true;
+				}
+				for (int32 Index = 0; Index < Polyline.Num(); ++Index)
+				{
+					FLinearColor Color = FLinearColor(0.2f, 0.9f, 0.3f);
+					if (Index == 0)
+					{
+						Color = CableSimRoleColor(StartState, Color);
+					}
+					else if (Index + 1 == Polyline.Num())
+					{
+						Color = CableSimRoleColor(EndState, Color);
+					}
+					else if (bInContact.IsValidIndex(Index) && bInContact[Index])
+					{
+						Color = FLinearColor::Yellow;
+					}
+					Spheres.Emplace(1.25f, FVector(Polyline[Index]), Color);
 				}
 			}
 			if (Settings.bDrawContacts)
 			{
-				for (const FVector3d& Point : ContactPoints)
+				for (const CableSim::FContactConstraint& Contact : Contacts)
 				{
+					if (!Particles.IsValidIndex(Contact.ParticleA)) continue;
+					const FVector3d PositionA = Particles[Contact.ParticleA].Position;
+					const FVector3d Point = Particles.IsValidIndex(Contact.ParticleB)
+						? FMath::Lerp(PositionA, Particles[Contact.ParticleB].Position, Contact.SegmentAlpha)
+						: PositionA;
 					Spheres.Emplace(2.25f, FVector(Point), FLinearColor::Yellow);
+					const double ArrowLength = FMath::Clamp(Contact.AccumulatedNormalCorrection, 0.0, 25.0) + 1.0;
+					ArrowLines.Emplace(
+						FVector(Point),
+						FVector(Point + Contact.Normal * ArrowLength),
+						FColor::Yellow,
+						3.0f);
+				}
+			}
+			if (Settings.bDrawFriction)
+			{
+				for (const CableSim::FContactConstraint& Contact : Contacts)
+				{
+					if (!Contact.bEnableFriction || Contact.AccumulatedNormalCorrection <= 0.0) continue;
+					Spheres.Emplace(1.5f, FVector(Contact.FrictionAnchor), FLinearColor(0.6f, 0.2f, 0.9f));
+					const FVector3d SlideDirection = Contact.SurfaceVelocity.GetSafeNormal();
+					if (!SlideDirection.IsNearlyZero())
+					{
+						Lines.Emplace(
+							FVector(Contact.FrictionAnchor),
+							FVector(Contact.FrictionAnchor + SlideDirection * 5.0),
+							FColor(150, 50, 230),
+							1.0f);
+					}
 				}
 			}
 			if (Settings.bDrawRejectedContacts)
@@ -130,6 +200,20 @@ namespace
 						Status.bBindingFailure ? TEXT("  BINDING INVALID") : TEXT("")),
 					FVector(Polyline[0]) + FVector(0.0, 0.0, 15.0),
 					Status.bMotionClamped ? FLinearColor::Yellow : FLinearColor::White);
+				Texts.Emplace(
+					FString::Printf(
+						TEXT("penetration=%.2f  segment_error=%.2f  queries=%d  triangles=%d  edges=%d  rejected=%d%s%s%s"),
+						Status.MaximumPenetration,
+						Status.MaximumSegmentError,
+						Status.CollisionQueryCount,
+						Status.CollisionTriangleCount,
+						Status.ConvexEdgeCount,
+						Status.RejectedContactCount,
+						Status.bCollisionDegraded ? TEXT("  COLLISION DEGRADED") : TEXT(""),
+						Status.bLengthChanging ? TEXT("  LENGTH CHANGING") : TEXT(""),
+						Status.bLengthClamped ? TEXT("  LENGTH CLAMPED") : TEXT("")),
+					FVector(Polyline[0]) + FVector(0.0, 0.0, 9.0),
+					Status.bCollisionDegraded ? FLinearColor::Red : FLinearColor(0.7f, 0.7f, 0.7f));
 			}
 		}
 
@@ -278,7 +362,6 @@ struct FCableSimRuntimeState
 	TArray<FVector3d> PreviousPositions;
 	TArray<FVector3d> CurrentPositions;
 	TArray<CableSim::FContactConstraint> DebugContacts;
-	TArray<FVector3d> DebugContactPoints;
 	TArray<FVector3d> DebugRejectedPoints;
 	double AccumulatedTime = 0.0;
 	double RenderAlpha = 1.0;
@@ -428,7 +511,6 @@ void UCableSimComponent::ReinitializeSimulation()
 	RuntimeState->CollisionSnapshot.Reset();
 	RuntimeState->Status = FCableSimStatus{};
 	RuntimeState->DebugContacts.Reset();
-	RuntimeState->DebugContactPoints.Reset();
 	RuntimeState->bEndpointBindingValid[0] = true;
 	RuntimeState->bEndpointBindingValid[1] = true;
 
@@ -869,6 +951,14 @@ void UCableSimComponent::PerformFixedStep(const double FrameAlpha)
 	{
 		IgnoredActors.Add(GetOwner());
 	}
+	if (IsValid(StartEndpoint.TargetComponent))
+	{
+		IgnoredActors.AddUnique(StartEndpoint.TargetComponent->GetOwner());
+	}
+	if (IsValid(EndEndpoint.TargetComponent))
+	{
+		IgnoredActors.AddUnique(EndEndpoint.TargetComponent->GetOwner());
+	}
 	const double StartTime = FPlatformTime::Seconds();
 	const bool bGeometryReady = FCableSimWorldCollisionProvider::GatherSnapshot(
 		GetWorld(),
@@ -954,22 +1044,8 @@ void UCableSimComponent::PerformFixedStep(const double FrameAlpha)
 	{
 		RuntimeState->PreviousPositions = RuntimeState->CurrentPositions;
 	}
-	RuntimeState->DebugContactPoints.Reset();
 	RuntimeState->DebugContacts = Contacts;
 	RuntimeState->DebugRejectedPoints = RejectedPoints;
-	for (const CableSim::FContactConstraint& Contact : Contacts)
-	{
-		if (!RuntimeState->Solver.GetParticles().IsValidIndex(Contact.ParticleA))
-		{
-			continue;
-		}
-		const TArray<CableSim::FParticle>& Particles = RuntimeState->Solver.GetParticles();
-		const FVector3d Point = Particles[Contact.ParticleA].Position * (1.0 - Contact.SegmentAlpha)
-			+ (Particles.IsValidIndex(Contact.ParticleB)
-				? Particles[Contact.ParticleB].Position * Contact.SegmentAlpha
-				: FVector3d::ZeroVector);
-		RuntimeState->DebugContactPoints.Add(Point);
-	}
 
 	RuntimeState->Status = FCableSimStatus{};
 	RuntimeState->Status.Status = bGeometryReady
@@ -1128,7 +1204,10 @@ FDebugRenderSceneProxy* UCableSimComponent::CreateDebugSceneProxy()
 	return new FCableSimDebugProxy(
 		this,
 		Polyline,
-		RuntimeState->DebugContactPoints,
+		RuntimeState->Solver.GetParticles(),
+		StartEndpoint.State,
+		EndEndpoint.State,
+		RuntimeState->DebugContacts,
 		RuntimeState->DebugRejectedPoints,
 		RuntimeState->CollisionSnapshot,
 		DebugSettings,

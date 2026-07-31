@@ -286,4 +286,51 @@ bool FCableSimSegmentPrimitiveContactTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimDrivenEndpointUnreachablePlaneTest,
+	"CableSim.Runtime.Dynamic.DrivenEndpointDiscardsUnreachablePlane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimDrivenEndpointUnreachablePlaneTest::RunTest(const FString& Parameters)
+{
+	CableSim::FSimulationConfig Config;
+	Config.Length = 10.0;
+	Config.SegmentLength = 10.0;
+	Config.MaximumParticles = 8;
+	Config.Gravity = FVector3d::ZeroVector;
+	Config.BendStrength = 0.0;
+	Config.StaticFriction = 0.0;
+	Config.DynamicFriction = 0.0;
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Initialize beside convex edge"), Solver.Initialize(
+		FVector3d(51.0, 51.0, -5.0),
+		FVector3d(51.0, 51.0, 5.0),
+		Config));
+	FCableSimCollisionSnapshot Snapshot;
+	Snapshot.Nodes.SetNum(2);
+	for (FCableSimNodeCollisionGeometry& Node : Snapshot.Nodes)
+	{
+		AddTestBox(Node.Triangles);
+		CableSim::FCollisionTopologyCompiler::CompileEdges(Node.Triangles, 0.1, Node.Edges);
+	}
+	CableSim::FStepInput Input;
+	Input.DeltaTime = 1.0 / 60.0;
+	Input.EndEndpoint.State = CableSim::EEndpointState::Driven;
+	Input.EndEndpoint.TargetPosition = FVector3d(5051.0, 5051.0, 5.0);
+	Solver.BeginStep(Input);
+	FCableSimCollisionSettings Collision;
+	Collision.Radius = 2.5;
+	Collision.SkinWidth = 0.0;
+	FCableSimFrictionSettings Friction;
+	Friction.bEnableFriction = false;
+	TArray<CableSim::FContactConstraint> Contacts;
+	TArray<FVector3d> Rejected;
+	FCableSimCollisionDiagnostics Diagnostics;
+	FCableSimWorldCollisionProvider::CompileContacts(
+		Snapshot, Collision, Friction, Solver, Input, Contacts, Rejected, Diagnostics);
+	TestEqual(TEXT("The box corner is unreachable from the far Driven target and is discarded"), Contacts.Num(), 0);
+	TestTrue(TEXT("The unreachable plane is recorded as rejected, not silently dropped"), Rejected.Num() > 0);
+	return true;
+}
+
 #endif

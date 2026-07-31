@@ -307,4 +307,107 @@ bool FCableSimLongCableMultigridTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimSuddenEndpointJumpTest,
+	"CableSim.Core.Dynamic.SuddenEndpointJumpSettles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimSuddenEndpointJumpTest::RunTest(const FString& Parameters)
+{
+	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
+	Config.Length = 3000.0;
+	Config.SegmentLength = 10.0;
+	Config.MaximumParticles = 512;
+	Config.MultigridIterations = 2;
+	Config.MultigridMinimumParticles = 64;
+	Config.SolverIterations = 64;
+	CableSim::FSolver Solver;
+	TestTrue(TEXT("Initialize 30 m cable"), Solver.Initialize(
+		FVector3d::ZeroVector,
+		FVector3d(2500.0, 0.0, 0.0),
+		Config));
+	CableSim::FStepInput Input = CableSimTests::FreeInput();
+	Input.StartEndpoint.State = CableSim::EEndpointState::Fixed;
+	Input.StartEndpoint.TargetPosition = FVector3d::ZeroVector;
+	Input.EndEndpoint.State = CableSim::EEndpointState::Fixed;
+	Input.EndEndpoint.TargetPosition = FVector3d(2500.0, 0.0, 0.0);
+	for (int32 Step = 0; Step < 60; ++Step)
+	{
+		Solver.AdvanceStep(Input);
+	}
+	// A hard, instantaneous yank: the Fixed endpoint jumps a large distance in
+	// a single step with no per-step speed limit, the way a teleported or
+	// hard-dragged attachment would. Without a motion pre-seed, only the
+	// iterative distance/bend/multigrid solve is responsible for resolving it.
+	Input.EndEndpoint.TargetPosition = FVector3d(2500.0, 300.0, 200.0);
+	const CableSim::FStepResult JumpResult = Solver.AdvanceStep(Input);
+	TestEqual(TEXT("Jump step remains valid"), JumpResult.Status, CableSim::ESimulationStatus::Ready);
+	CableSim::FStepResult Result;
+	for (int32 Step = 0; Step < 120; ++Step)
+	{
+		Result = Solver.AdvanceStep(Input);
+	}
+	AddInfo(FString::Printf(
+		TEXT("post-jump settle strain=%.6f penetration=%.6f endpoint=(%.3f %.3f %.3f)"),
+		Result.MaximumSegmentStrain,
+		Result.MaximumPenetration,
+		Result.EndEndpoint.AcceptedPosition.X,
+		Result.EndEndpoint.AcceptedPosition.Y,
+		Result.EndEndpoint.AcceptedPosition.Z));
+	TestEqual(TEXT("Settled after jump remains valid"), Result.Status, CableSim::ESimulationStatus::Ready);
+	TestTrue(TEXT("Cable settles to low strain after a hard jump"), Result.MaximumSegmentStrain < 0.01);
+	TestTrue(TEXT("Fixed endpoint reaches the jumped target exactly"),
+		FVector3d::Distance(Result.EndEndpoint.AcceptedPosition, Input.EndEndpoint.TargetPosition) < 0.01);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimSustainedDragTest,
+	"CableSim.Core.Dynamic.SustainedDragStaysSmooth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimSustainedDragTest::RunTest(const FString& Parameters)
+{
+	CableSim::FSimulationConfig Config = CableSimTests::MakeConfig();
+	Config.Length = 400.0;
+	Config.SegmentLength = 10.0;
+	Config.MaximumParticles = 64;
+	CableSim::FSolver Solver;
+	const double Radius = 350.0;
+	TestTrue(TEXT("Initialize 4 m cable with 50cm slack"), Solver.Initialize(
+		FVector3d::ZeroVector,
+		FVector3d(Radius, 0.0, 0.0),
+		Config));
+	CableSim::FStepInput Input = CableSimTests::FreeInput();
+	Input.StartEndpoint.State = CableSim::EEndpointState::Fixed;
+	Input.StartEndpoint.TargetPosition = FVector3d::ZeroVector;
+	Input.EndEndpoint.State = CableSim::EEndpointState::Fixed;
+	// A realistic continuous drag: swing the far end around the anchor at a
+	// constant 350cm radius (within the 400cm rest length, so the cable never
+	// has to stretch), with ~700 cm/s (sprint speed) tangential velocity.
+	const double AngularSpeed = 700.0 / Radius;
+	double MaximumObservedStrain = 0.0;
+	CableSim::FStepResult Result;
+	for (int32 Step = 0; Step < 60; ++Step)
+	{
+		const double Angle = AngularSpeed * (Step + 1) * Input.DeltaTime;
+		Input.EndEndpoint.TargetPosition = FVector3d(Radius * FMath::Cos(Angle), Radius * FMath::Sin(Angle), 0.0);
+		Result = Solver.AdvanceStep(Input);
+		MaximumObservedStrain = FMath::Max(MaximumObservedStrain, Result.MaximumSegmentStrain);
+	}
+	AddInfo(FString::Printf(
+		TEXT("sustained drag maxStrain=%.6f finalStrain=%.6f endpoint=(%.3f %.3f %.3f)"),
+		MaximumObservedStrain,
+		Result.MaximumSegmentStrain,
+		Result.EndEndpoint.AcceptedPosition.X,
+		Result.EndEndpoint.AcceptedPosition.Y,
+		Result.EndEndpoint.AcceptedPosition.Z));
+	TestEqual(TEXT("Sustained drag remains valid throughout"), Result.Status, CableSim::ESimulationStatus::Ready);
+	TestTrue(TEXT("Realistic continuous drag never approaches a large single-step strain spike"),
+		MaximumObservedStrain < 0.05);
+	TestTrue(TEXT("Dragged endpoint tracks its target exactly"),
+		FVector3d::Distance(Result.EndEndpoint.AcceptedPosition, Input.EndEndpoint.TargetPosition) < 0.01);
+	return true;
+}
+
 #endif

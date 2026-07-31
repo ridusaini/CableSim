@@ -274,6 +274,14 @@ struct CABLESIMRUNTIME_API FCableSimDebugSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	bool bDrawStatus = true;
 
+	/** Colors the cable line by each segment's estimated tension (cold = slack, hot = near this frame's peak) instead of a flat CableColor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bColorByTension = true;
+
+	/** Draws a small marker at each active friction anchor plus a line toward the contact's surface velocity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	bool bDrawFriction = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	FLinearColor CableColor = FLinearColor(0.0f, 1.0f, 1.0f);
 
