@@ -9,10 +9,14 @@ namespace CableSim
 		Uninitialized,
 		Ready,
 		NoRelevantGeometry,
+		InvalidSeed,
+		FeatureUnavailable,
+		PathBlocked,
 		NonManifoldTopology,
 		TopologyOverValence,
-		FeatureInvalidated,
-		IterationBudgetExceeded,
+		MovementBudgetExceeded,
+		CollisionBudgetExceeded,
+		TopologyBudgetExceeded,
 		InvalidConfiguration,
 		NumericalFailure
 	};
@@ -20,13 +24,29 @@ namespace CableSim
 	enum class ETautPointType : uint8
 	{
 		Endpoint,
-		EdgeContact
+		EdgeContact,
+		VertexContact
+	};
+
+	/**
+	 * Non-owning, immutable topology supplied for one solve. Runtime owns the
+	 * backing snapshot. A complete admitted Box/Convex shape must be present;
+	 * fragmenting a convex shape invalidates the edge topology predicates.
+	 */
+	struct CABLESIMCORE_API FTautCollisionScene
+	{
+		TConstArrayView<FCollisionTriangle> Triangles;
+		TConstArrayView<FCollisionEdge> Edges;
+		TConstArrayView<FCollisionVertex> Vertices;
 	};
 
 	struct CABLESIMCORE_API FTautConfig
 	{
 		double TopologyTolerance = 0.1;
-		int32 MaximumCollisionPasses = 16;
+		double MovementConvergenceTolerance = 0.01;
+		double ParametricTolerance = 1.e-8;
+		int32 MaximumMovementIterations = 32;
+		int32 MaximumCollisionPhases = 32;
 		int32 MaximumPathPoints = 32;
 		int32 MaximumTopologyEvents = 32;
 		int32 MaximumIncidentEdges = 8;
@@ -49,11 +69,15 @@ namespace CableSim
 	struct CABLESIMCORE_API FTautStepResult
 	{
 		ETautStatus Status = ETautStatus::Uninitialized;
+		FCollisionFeatureId FailureFeature;
 		uint64 StepIndex = 0;
 		int32 PointCount = 0;
 		int32 ContactCount = 0;
-		int32 CollisionPassCount = 0;
+		int32 MovementIterationCount = 0;
+		int32 CollisionPhaseCount = 0;
+		int32 TopologyEventCount = 0;
 		double PathLength = 0.0;
+		bool bPathCollisionFree = false;
 	};
 
 	struct CABLESIMCORE_API FTautStateSnapshot
@@ -67,15 +91,20 @@ namespace CableSim
 	struct CABLESIMCORE_API FTautReplayFrame
 	{
 		FTautStepInput Input;
+		TArray<FCollisionTriangle> Triangles;
 		TArray<FCollisionEdge> Edges;
+		TArray<FCollisionVertex> Vertices;
 	};
 
 	class CABLESIMCORE_API FTautPathSolver
 	{
 	public:
-		bool Initialize(const FVector3d& Start, const FVector3d& End, const FTautConfig& InConfig = {});
+		bool Initialize(
+			TConstArrayView<FVector3d> SeedPolyline,
+			const FTautCollisionScene& Scene,
+			const FTautConfig& InConfig = {});
 		void Reset();
-		FTautStepResult AdvanceStep(const FTautStepInput& Input, TConstArrayView<FCollisionEdge> Edges);
+		FTautStepResult AdvanceStep(const FTautStepInput& Input, const FTautCollisionScene& Scene);
 
 		bool IsInitialized() const { return Points.Num() >= 2; }
 		const TArray<FTautPoint>& GetPoints() const { return Points; }
@@ -83,11 +112,6 @@ namespace CableSim
 		const FTautReplayFrame& GetLastReplayFrame() const { return LastReplayFrame; }
 		FTautStateSnapshot CaptureState() const;
 		bool RestoreState(const FTautStateSnapshot& Snapshot);
-		bool CalculateReachableEndpoint(
-			bool bStartEndpoint,
-			double MaximumPathLength,
-			FVector3d& OutReachablePosition,
-			double& OutExcessDistance) const;
 
 	private:
 		struct FSweepHit
@@ -100,26 +124,42 @@ namespace CableSim
 		static bool IsFinite(const FVector3d& Value);
 		static bool IsValidConfig(const FTautConfig& InConfig);
 		static bool IsUsableEdge(const FCollisionEdge& Edge, double Tolerance);
-		static bool HasUsableEdge(TConstArrayView<FCollisionEdge> Edges, double Tolerance);
+		static bool HasUsableEdge(const FTautCollisionScene& Scene, double Tolerance);
+		static const FCollisionEdge* FindEdge(
+			const FCollisionFeatureId& FeatureId,
+			const FTautCollisionScene& Scene);
+		static const FCollisionVertex* FindVertex(
+			const FCollisionFeatureId& FeatureId,
+			const FTautCollisionScene& Scene);
 		static bool SegmentIntersectsTriangle(
 			const FVector3d& SegmentStart,
 			const FVector3d& SegmentEnd,
 			const FVector3d& Triangle0,
 			const FVector3d& Triangle1,
 			const FVector3d& Triangle2,
-			double Tolerance,
+			double ParametricTolerance,
 			double& OutSegmentParameter,
 			FVector3d& OutBarycentric);
+		static bool SegmentIsCollisionFree(
+			const FVector3d& Start,
+			const FVector3d& End,
+			const FTautCollisionScene& Scene,
+			double DistanceTolerance,
+			double ParametricTolerance);
 		static bool FindFirstSweepHit(
 			const FVector3d& FixedPoint,
 			const FVector3d& MovingStart,
 			const FVector3d& MovingTarget,
-			TConstArrayView<FCollisionEdge> Edges,
-			double Tolerance,
+			const FTautCollisionScene& Scene,
+			const FCollisionFeatureId& IgnoredFeature,
+			double DistanceTolerance,
+			double ParametricTolerance,
 			FSweepHit& OutHit);
-		static const FCollisionEdge* FindEdge(
-			const FCollisionFeatureId& FeatureId,
-			TConstArrayView<FCollisionEdge> Edges);
+		static bool BuildCollisionFreeSeed(
+			TConstArrayView<FVector3d> PreferredPolyline,
+			const FTautCollisionScene& Scene,
+			const FTautConfig& InConfig,
+			TArray<FTautPoint>& OutPoints);
 		static bool RequiresWrap(
 			const FVector3d& Start,
 			const FVector3d& End,
@@ -133,8 +173,13 @@ namespace CableSim
 			FVector3d& OutPosition,
 			double& OutParameter);
 		static double CalculatePathLength(TConstArrayView<FTautPoint> InPoints);
-		bool ValidateState() const;
-		void UpdateResult(ETautStatus Status, int32 CollisionPassCount);
+		bool ValidateState(const FTautCollisionScene* Scene = nullptr) const;
+		void UpdateResult(
+			ETautStatus Status,
+			int32 MovementIterations,
+			int32 CollisionPhases,
+			int32 TopologyEvents,
+			const FCollisionFeatureId& FailureFeature = {});
 
 		TArray<FTautPoint> Points;
 		FTautConfig Config;

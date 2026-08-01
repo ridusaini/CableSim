@@ -27,12 +27,13 @@ namespace
 		const TConstArrayView<CableSim::FParticle> Particles,
 		const FVector3d& StartTarget,
 		const FVector3d& EndTarget,
+		const TConstArrayView<FVector3d> TautPathPoints,
 		const double Padding,
 		TArray<FBox>& OutSegmentBounds)
 	{
 		const double SafePadding = FMath::Max(Padding, 0.1);
 		const int32 LastParticle = Particles.Num() - 1;
-		OutSegmentBounds.Reset(FMath::Max(LastParticle, 0));
+		OutSegmentBounds.Reset(FMath::Max(LastParticle, 0) + FMath::Max(TautPathPoints.Num() - 1, 0));
 		for (int32 Index = 0; Index < LastParticle; ++Index)
 		{
 			FBox Segment(ForceInit);
@@ -48,6 +49,17 @@ namespace
 			{
 				Segment += FVector(EndTarget);
 			}
+			OutSegmentBounds.Add(Segment.ExpandBy(SafePadding));
+		}
+		// The dynamic rope can settle away from the taut path with nothing
+		// pulling it back until a wrap is (re)found; sweep the taut path's own
+		// segments too so its geometry stays visible regardless of where the
+		// rope currently sits.
+		for (int32 Index = 0; Index + 1 < TautPathPoints.Num(); ++Index)
+		{
+			FBox Segment(ForceInit);
+			Segment += FVector(TautPathPoints[Index]);
+			Segment += FVector(TautPathPoints[Index + 1]);
 			OutSegmentBounds.Add(Segment.ExpandBy(SafePadding));
 		}
 	}
@@ -122,9 +134,10 @@ namespace
 		const CableSim::ECollisionGeometryType GeometryType,
 		const bool bStaticObject,
 		const TConstArrayView<FBox> SegmentBounds,
-		TArray<CableSim::FCollisionTriangle>& OutTriangles)
+		TArray<CableSim::FCollisionTriangle>& OutTriangles,
+		const bool bCullByProximity = true)
 	{
-		if (!TriangleNearSegments(Position0, Position1, Position2, SegmentBounds))
+		if (bCullByProximity && !TriangleNearSegments(Position0, Position1, Position2, SegmentBounds))
 		{
 			return;
 		}
@@ -176,6 +189,8 @@ namespace
 			{
 				Swap(Indices[TriangleIndex][1], Indices[TriangleIndex][2]);
 			}
+			// Shape-level bounds already gated by the caller; per-triangle
+			// culling here would fragment the box's topology (see CompileTopology).
 			AddTriangle(
 				ObjectToken,
 				ShapeIndex,
@@ -189,7 +204,8 @@ namespace
 				CableSim::ECollisionGeometryType::Box,
 				bStaticObject,
 				SegmentBounds,
-				OutTriangles);
+				OutTriangles,
+				false);
 		}
 	}
 
@@ -225,6 +241,7 @@ namespace
 					const FVector3d Local = FVector3d(Convex.GetVertex(VertexIndices[Corner])) * Scale;
 					Positions[Corner] = FVector3d(LocalToWorld.TransformPosition(FVector(Local)));
 				}
+				// Same reasoning as AddBoxTriangles above.
 				AddTriangle(
 					ObjectToken,
 					ShapeIndex,
@@ -238,7 +255,8 @@ namespace
 					CableSim::ECollisionGeometryType::Convex,
 					bStaticObject,
 					SegmentBounds,
-					OutTriangles);
+					OutTriangles,
+					false);
 			}
 		}
 	}
@@ -447,6 +465,7 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 	const TConstArrayView<CableSim::FParticle> Particles,
 	const FVector3d& StartTarget,
 	const FVector3d& EndTarget,
+	const TConstArrayView<FVector3d> TautPathPoints,
 	FCableSimChaosObjectTracker& ObjectTracker,
 	FCableSimChaosSnapshot& OutSnapshot)
 {
@@ -462,6 +481,7 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 		Particles,
 		StartTarget,
 		EndTarget,
+		TautPathPoints,
 		CollisionSettings.Radius + TopologyTolerance,
 		SegmentBounds);
 	OutSnapshot.QueryBounds = UnionBounds(SegmentBounds);

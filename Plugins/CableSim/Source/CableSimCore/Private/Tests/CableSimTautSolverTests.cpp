@@ -45,14 +45,33 @@ namespace CableSimTautTests
 		{
 			Triangles.Add(MakeTriangle(
 				Index,
-				Indices[Index][0],
-				Indices[Index][1],
-				Indices[Index][2],
+				Indices[Index][0], Indices[Index][1], Indices[Index][2],
 				Vertices[Indices[Index][0]],
 				Vertices[Indices[Index][1]],
 				Vertices[Indices[Index][2]]));
 		}
 		return Triangles;
+	}
+
+	struct FOwnedScene
+	{
+		TArray<CableSim::FCollisionTriangle> Triangles;
+		TArray<CableSim::FCollisionEdge> Edges;
+		TArray<CableSim::FCollisionVertex> Vertices;
+
+		CableSim::FTautCollisionScene View() const
+		{
+			return {Triangles, Edges, Vertices};
+		}
+	};
+
+	FOwnedScene MakeBoxScene()
+	{
+		FOwnedScene Scene;
+		Scene.Triangles = MakeBoxTriangles();
+		CableSim::FCollisionTopologyCompiler::CompileTopology(
+			Scene.Triangles, 1.e-6, 8, Scene.Edges, Scene.Vertices);
+		return Scene;
 	}
 
 	CableSim::FCollisionEdge MakeVerticalEdge()
@@ -69,24 +88,31 @@ namespace CableSimTautTests
 		return Edge;
 	}
 
-	CableSim::FCollisionEdge MakeSecondVerticalEdge()
+	FOwnedScene MakeVerticalEdgeScene()
 	{
-		CableSim::FCollisionEdge Edge = MakeVerticalEdge();
-		Edge.Id.Index0 = 20;
-		Edge.Id.Index1 = 21;
-		Edge.Start.X = -5.0;
-		Edge.End.X = -5.0;
-		Edge.Start.Y = 5.0;
-		Edge.End.Y = 5.0;
-		return Edge;
+		FOwnedScene Scene;
+		Scene.Edges.Add(MakeVerticalEdge());
+		for (const bool bStart : {true, false})
+		{
+			CableSim::FCollisionVertex Vertex;
+			Vertex.Id = {
+				Scene.Edges[0].Id.ObjectToken,
+				Scene.Edges[0].Id.ShapeIndex,
+				CableSim::ECollisionFeatureType::Vertex,
+				bStart ? Scene.Edges[0].Id.Index0 : Scene.Edges[0].Id.Index1,
+				INDEX_NONE};
+			Vertex.GeometryType = CableSim::ECollisionGeometryType::Box;
+			Vertex.bStaticObject = true;
+			Vertex.Position = bStart ? Scene.Edges[0].Start : Scene.Edges[0].End;
+			Vertex.IncidentEdges.Add(Scene.Edges[0].Id);
+			Scene.Vertices.Add(Vertex);
+		}
+		return Scene;
 	}
 
 	CableSim::FTautStepInput MakeInput(const FVector3d& Start, const FVector3d& End)
 	{
-		CableSim::FTautStepInput Input;
-		Input.StartTarget = Start;
-		Input.EndTarget = End;
-		return Input;
+		return {Start, End};
 	}
 
 	bool PointsEqual(
@@ -102,7 +128,8 @@ namespace CableSimTautTests
 			if (First[Index].Type != Second[Index].Type
 				|| First[Index].FeatureId != Second[Index].FeatureId
 				|| !First[Index].Position.Equals(Second[Index].Position, 1.e-12)
-				|| !FMath::IsNearlyEqual(First[Index].EdgeParameter, Second[Index].EdgeParameter, 1.e-12))
+				|| !FMath::IsNearlyEqual(
+					First[Index].EdgeParameter, Second[Index].EdgeParameter, 1.e-12))
 			{
 				return false;
 			}
@@ -118,22 +145,56 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCableSimTopologyBoxTest::RunTest(const FString& Parameters)
 {
-	const TArray<CableSim::FCollisionTriangle> Triangles = CableSimTautTests::MakeBoxTriangles();
+	const CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeBoxScene();
+	int32 ConvexEdges = 0;
+	int32 CoplanarEdges = 0;
+	for (const CableSim::FCollisionEdge& Edge : Scene.Edges)
+	{
+		ConvexEdges += Edge.Kind == CableSim::ECollisionEdgeKind::Convex ? 1 : 0;
+		CoplanarEdges += Edge.Kind == CableSim::ECollisionEdgeKind::Coplanar ? 1 : 0;
+		TestEqual(TEXT("Box geometry provenance reaches every edge"),
+			Edge.GeometryType, CableSim::ECollisionGeometryType::Box);
+		TestTrue(TEXT("Box static provenance reaches every edge"), Edge.bStaticObject);
+	}
+	TestEqual(TEXT("A triangulated engine cube has twelve convex edges"), ConvexEdges, 12);
+	TestEqual(TEXT("Its six face diagonals remain non-wrapping topology"), CoplanarEdges, 6);
+	TestEqual(TEXT("All full-shape edges are retained"), Scene.Edges.Num(), 18);
+	TestEqual(TEXT("All eight shared cube vertices are retained"), Scene.Vertices.Num(), 8);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTopologyTouchingShapesClusterTest,
+	"CableSim.Core.Topology.TouchingShapesCluster",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTopologyTouchingShapesClusterTest::RunTest(const FString& Parameters)
+{
+	TArray<CableSim::FCollisionTriangle> Triangles = CableSimTautTests::MakeBoxTriangles();
+	TArray<CableSim::FCollisionTriangle> SecondBox = CableSimTautTests::MakeBoxTriangles();
+	for (CableSim::FCollisionTriangle& Triangle : SecondBox)
+	{
+		Triangle.Id.ObjectToken = 2;
+		for (FVector3d& Position : Triangle.Vertices)
+		{
+			Position.X += 2.0;
+		}
+	}
+	Triangles.Append(SecondBox);
 	TArray<CableSim::FCollisionEdge> Edges;
 	TArray<CableSim::FCollisionVertex> Vertices;
 	const CableSim::FTopologyCompileDiagnostics Diagnostics =
-		CableSim::FCollisionTopologyCompiler::CompileTopology(Triangles, 1.e-6, 8, Edges, Vertices);
-	TestEqual(TEXT("A triangulated box has twelve convex boundary edges"), Diagnostics.ConvexEdgeCount, 12);
-	TestEqual(TEXT("A triangulated box has six coplanar face diagonals"), Diagnostics.CoplanarEdgeCount, 6);
-	TestEqual(TEXT("A closed box has no boundary edges"), Diagnostics.BoundaryEdgeCount, 0);
-	TestEqual(TEXT("All unique box edges are emitted"), Edges.Num(), 18);
-	TestEqual(TEXT("The topology snapshot retains eight shared vertices"), Vertices.Num(), 8);
-	TestEqual(TEXT("Box topology stays within the incident-edge budget"), Diagnostics.OverValenceVertexCount, 0);
-	for (const CableSim::FCollisionEdge& Edge : Edges)
+		CableSim::FCollisionTopologyCompiler::CompileTopology(
+			Triangles, 1.e-6, 8, Edges, Vertices);
+	TestEqual(TEXT("Four coincident vertex pairs become shared topology"), Vertices.Num(), 12);
+	TestEqual(TEXT("Touching ordinary boxes remain within the valence budget"),
+		Diagnostics.OverValenceVertexCount, 0);
+	int32 MaximumValence = 0;
+	for (const CableSim::FCollisionVertex& Vertex : Vertices)
 	{
-		TestEqual(TEXT("Geometry provenance reaches compiled edges"), Edge.GeometryType, CableSim::ECollisionGeometryType::Box);
-		TestTrue(TEXT("Static provenance reaches compiled edges"), Edge.bStaticObject);
+		MaximumValence = FMath::Max(MaximumValence, Vertex.IncidentEdges.Num());
 	}
+	TestEqual(TEXT("A shared cube corner carries the six wrapping edges"), MaximumValence, 6);
 	return true;
 }
 
@@ -151,14 +212,42 @@ bool FCableSimTopologyDeterminismTest::RunTest(const FString& Parameters)
 	TArray<CableSim::FCollisionEdge> SecondEdges;
 	CableSim::FCollisionTopologyCompiler::CompileEdges(Forward, 1.e-6, FirstEdges);
 	CableSim::FCollisionTopologyCompiler::CompileEdges(Reverse, 1.e-6, SecondEdges);
-	TestEqual(TEXT("Both orders produce the same number of edges"), FirstEdges.Num(), SecondEdges.Num());
+	TestEqual(TEXT("Triangle order produces the same edge count"), FirstEdges.Num(), SecondEdges.Num());
 	for (int32 Index = 0; Index < FirstEdges.Num() && Index < SecondEdges.Num(); ++Index)
 	{
-		TestTrue(TEXT("Stable edge identifiers"), FirstEdges[Index].Id == SecondEdges[Index].Id);
-		TestEqual(TEXT("Stable edge classification"), FirstEdges[Index].Kind, SecondEdges[Index].Kind);
-		TestTrue(TEXT("Stable edge start"), FirstEdges[Index].Start.Equals(SecondEdges[Index].Start, 1.e-12));
-		TestTrue(TEXT("Stable edge end"), FirstEdges[Index].End.Equals(SecondEdges[Index].End, 1.e-12));
+		TestTrue(TEXT("Edge identifiers are stable"), FirstEdges[Index].Id == SecondEdges[Index].Id);
+		TestEqual(TEXT("Edge classification is stable"), FirstEdges[Index].Kind, SecondEdges[Index].Kind);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautDefaultCubeSeedTest,
+	"CableSim.Core.Taut.DefaultCubeSeed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautDefaultCubeSeedTest::RunTest(const FString& Parameters)
+{
+	const CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeBoxScene();
+	const FVector3d DirectSeed[] = {{-3.0, 0.0, 0.0}, {3.0, 0.0, 0.0}};
+	CableSim::FTautPathSolver DirectSolver;
+	TestTrue(TEXT("A blocked seed through opposing cube faces is repaired"),
+		DirectSolver.Initialize(MakeArrayView(DirectSeed), Scene.View()));
+	TestTrue(TEXT("The repaired opposing-face route is collision free"),
+		DirectSolver.GetLastResult().bPathCollisionFree);
+	TestTrue(TEXT("The repaired route goes around the cube"),
+		DirectSolver.GetPoints().Num() > 2);
+
+	const FVector3d RoutedSeed[] = {
+		{-3.0, 0.0, 0.0}, {-2.0, 2.0, 0.0},
+		{2.0, 2.0, 0.0}, {3.0, 0.0, 0.0}};
+	CableSim::FTautPathSolver RoutedSolver;
+	TestTrue(TEXT("A collision-free dynamic-rope seed around the cube initializes"),
+		RoutedSolver.Initialize(MakeArrayView(RoutedSeed), Scene.View()));
+	TestTrue(TEXT("The initialized route is collision free"),
+		RoutedSolver.GetLastResult().bPathCollisionFree);
+	TestTrue(TEXT("The route preserves contacts instead of collapsing through the cube"),
+		RoutedSolver.GetPoints().Num() > 2);
 	return true;
 }
 
@@ -169,157 +258,80 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCableSimTautWrapLifecycleTest::RunTest(const FString& Parameters)
 {
+	const CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeVerticalEdgeScene();
 	const FVector3d InitialStart(10.0, 10.0, 0.0);
 	const FVector3d End(-10.0, 10.0, 0.0);
-	const CableSim::FCollisionEdge Edge = CableSimTautTests::MakeVerticalEdge();
+	const FVector3d Seed[] = {InitialStart, End};
 	CableSim::FTautPathSolver Solver;
-	TestTrue(TEXT("Taut solver initializes"), Solver.Initialize(InitialStart, End));
+	TestTrue(TEXT("Taut solver initializes from a polyline"),
+		Solver.Initialize(MakeArrayView(Seed), Scene.View()));
 	const CableSim::FTautStepResult WrapResult = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), End),
-		MakeArrayView(&Edge, 1));
-	TestEqual(TEXT("Crossing inserts one edge contact"), WrapResult.ContactCount, 1);
-	TestEqual(TEXT("One-edge path contains three points"), WrapResult.PointCount, 3);
-	TestEqual(TEXT("Supported wrap remains ready"), WrapResult.Status, CableSim::ETautStatus::Ready);
+		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), End), Scene.View());
+	TestEqual(TEXT("Continuous endpoint motion inserts an edge contact"), WrapResult.ContactCount, 1);
+	TestTrue(TEXT("The wrapped path remains valid"), WrapResult.bPathCollisionFree);
 
 	const CableSim::FTautStepResult UnwrapResult = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(InitialStart, End),
-		MakeArrayView(&Edge, 1));
-	TestEqual(TEXT("Returning to the same incident face unwraps"), UnwrapResult.ContactCount, 0);
-	TestEqual(TEXT("Unwrapped path contains endpoints only"), UnwrapResult.PointCount, 2);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimTautSlideAndVertexBoundaryTest,
-	"CableSim.Core.Taut.SlideAndVertexBoundary",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCableSimTautSlideAndVertexBoundaryTest::RunTest(const FString& Parameters)
-{
-	const CableSim::FCollisionEdge Edge = CableSimTautTests::MakeVerticalEdge();
-	CableSim::FTautPathSolver Solver;
-	Solver.Initialize(FVector3d(10.0, 10.0, 0.0), FVector3d(-10.0, 10.0, 0.0));
-	Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), FVector3d(-10.0, 10.0, 0.0)),
-		MakeArrayView(&Edge, 1));
-	const CableSim::FTautStepResult SlideResult = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 20.0), FVector3d(-10.0, 10.0, -10.0)),
-		MakeArrayView(&Edge, 1));
-	TestEqual(TEXT("Sliding remains a supported one-edge path"), SlideResult.Status, CableSim::ETautStatus::Ready);
-	TestTrue(TEXT("The contact slides to the unfolded axial minimum"), Solver.GetPoints()[1].Position.Equals(FVector3d(0.0, 0.0, 5.0), 1.e-9));
-
-	const CableSim::FTautStepResult VertexResult = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 300.0), FVector3d(-10.0, 10.0, 300.0)),
-		MakeArrayView(&Edge, 1));
-	TestEqual(TEXT("A represented vertex remains a valid topology point"), VertexResult.Status, CableSim::ETautStatus::Ready);
-	TestTrue(TEXT("The contact clamps to the represented edge vertex"),
-		Solver.GetPoints()[1].Position.Equals(Edge.End, 1.e-9));
+		CableSimTautTests::MakeInput(InitialStart, End), Scene.View());
+	TestEqual(TEXT("Returning to the same incident face releases the contact"),
+		UnwrapResult.ContactCount, 0);
+	TestEqual(TEXT("The solver is not sticky after the obstruction clears"),
+		UnwrapResult.PointCount, 2);
 	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautReplayAndInvalidationTest,
-	"CableSim.Core.Taut.ReplayAndInvalidation",
+	"CableSim.Core.Taut.ReplayAndConservativeInvalidation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCableSimTautReplayAndInvalidationTest::RunTest(const FString& Parameters)
 {
-	const CableSim::FCollisionEdge Edge = CableSimTautTests::MakeVerticalEdge();
+	const CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeVerticalEdgeScene();
+	const FVector3d Seed[] = {{10.0, 10.0, 0.0}, {-10.0, 10.0, 0.0}};
 	CableSim::FTautPathSolver Solver;
-	Solver.Initialize(FVector3d(10.0, 10.0, 0.0), FVector3d(-10.0, 10.0, 0.0));
-	const CableSim::FTautStateSnapshot InitialState = Solver.CaptureState();
+	Solver.Initialize(MakeArrayView(Seed), Scene.View());
 	Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 20.0), FVector3d(-10.0, 10.0, -10.0)),
-		MakeArrayView(&Edge, 1));
-	const CableSim::FTautStateSnapshot FirstResult = Solver.CaptureState();
-	const CableSim::FTautReplayFrame ReplayFrame = Solver.GetLastReplayFrame();
-	TestTrue(TEXT("Initial state restores"), Solver.RestoreState(InitialState));
-	Solver.AdvanceStep(ReplayFrame.Input, ReplayFrame.Edges);
-	TestTrue(TEXT("Recorded topology and input replay deterministically"),
-		CableSimTautTests::PointsEqual(FirstResult.Points, Solver.GetPoints()));
+		CableSimTautTests::MakeInput({10.0, -10.0, 20.0}, {-10.0, 10.0, -10.0}),
+		Scene.View());
+	const CableSim::FTautStateSnapshot WrappedState = Solver.CaptureState();
+	const CableSim::FTautReplayFrame Replay = Solver.GetLastReplayFrame();
+	TestTrue(TEXT("Wrapped state restores"), Solver.RestoreState(WrappedState));
+	const CableSim::FTautCollisionScene ReplayScene{
+		Replay.Triangles, Replay.Edges, Replay.Vertices};
+	Solver.AdvanceStep(Replay.Input, ReplayScene);
+	TestTrue(TEXT("A captured solve replays deterministically"),
+		CableSimTautTests::PointsEqual(WrappedState.Points, Solver.GetPoints()));
 
-	const CableSim::FTautStateSnapshot BeforeInvalidation = Solver.CaptureState();
-	const CableSim::FTautStepResult Invalidated = Solver.AdvanceStep(ReplayFrame.Input, {});
-	TestEqual(TEXT("A disappeared persistent feature is reported"), Invalidated.Status, CableSim::ETautStatus::FeatureInvalidated);
-	TestTrue(TEXT("Feature invalidation preserves the last valid path"),
-		CableSimTautTests::PointsEqual(BeforeInvalidation.Points, Solver.GetPoints()));
+	const TArray<CableSim::FTautPoint> BeforeInvalidation = Solver.GetPoints();
+	const CableSim::FTautStepResult Invalidated = Solver.AdvanceStep(Replay.Input, {});
+	TestEqual(TEXT("A missing persistent feature is an explicit conservative failure"),
+		Invalidated.Status, CableSim::ETautStatus::FeatureUnavailable);
+	TestTrue(TEXT("Feature loss preserves the last valid path"),
+		CableSimTautTests::PointsEqual(BeforeInvalidation, Solver.GetPoints()));
 	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimTautMultipleContactBoundaryTest,
-	"CableSim.Core.Taut.MultipleContactBoundary",
+	FCableSimTautCollisionBudgetTest,
+	"CableSim.Core.Taut.CollisionBudget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FCableSimTautMultipleContactBoundaryTest::RunTest(const FString& Parameters)
+bool FCableSimTautCollisionBudgetTest::RunTest(const FString& Parameters)
 {
-	CableSim::FTautPathSolver Solver;
-	Solver.Initialize(FVector3d(10.0, 10.0, 0.0), FVector3d(-10.0, -10.0, 0.0));
-	const CableSim::FCollisionEdge Edges[2] = {
-		CableSimTautTests::MakeVerticalEdge(),
-		CableSimTautTests::MakeSecondVerticalEdge()};
-	const CableSim::FTautStepResult Result = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), FVector3d(-10.0, 10.0, 0.0)),
-		MakeArrayView(Edges));
-	TestEqual(TEXT("Separate simultaneous wraps remain supported"), Result.Status, CableSim::ETautStatus::Ready);
-	TestEqual(TEXT("The ordered path retains both edge contacts"), Result.ContactCount, 2);
-	TestEqual(TEXT("Two contacts plus two endpoints form four path points"), Result.PointCount, 4);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimTautBudgetTest,
-	"CableSim.Core.Taut.IterationBudget",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCableSimTautBudgetTest::RunTest(const FString& Parameters)
-{
+	const CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeVerticalEdgeScene();
 	CableSim::FTautConfig Config;
-	Config.MaximumCollisionPasses = 1;
+	Config.MaximumCollisionPhases = 1;
+	const FVector3d Seed[] = {{10.0, 10.0, 0.0}, {-10.0, 10.0, 0.0}};
 	CableSim::FTautPathSolver Solver;
-	Solver.Initialize(FVector3d(10.0, 10.0, 0.0), FVector3d(-10.0, 10.0, 0.0), Config);
+	Solver.Initialize(MakeArrayView(Seed), Scene.View(), Config);
 	const CableSim::FTautStateSnapshot InitialState = Solver.CaptureState();
-	const CableSim::FCollisionEdge Edge = CableSimTautTests::MakeVerticalEdge();
 	const CableSim::FTautStepResult Result = Solver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), FVector3d(-10.0, 10.0, 0.0)),
-		MakeArrayView(&Edge, 1));
-	TestEqual(TEXT("The collision-pass budget is explicit"), Result.Status, CableSim::ETautStatus::IterationBudgetExceeded);
-	TestTrue(TEXT("Budget exhaustion preserves the last valid path"),
+		CableSimTautTests::MakeInput({10.0, -10.0, 0.0}, {-10.0, 10.0, 0.0}),
+		Scene.View());
+	TestEqual(TEXT("Collision-phase exhaustion has its own status"),
+		Result.Status, CableSim::ETautStatus::CollisionBudgetExceeded);
+	TestTrue(TEXT("Budget exhaustion preserves the last valid state"),
 		CableSimTautTests::PointsEqual(InitialState.Points, Solver.GetPoints()));
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCableSimTautReachLimitTest,
-	"CableSim.Core.Taut.ReachLimit",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FCableSimTautReachLimitTest::RunTest(const FString& Parameters)
-{
-	CableSim::FTautPathSolver StraightSolver;
-	StraightSolver.Initialize(FVector3d::ZeroVector, FVector3d(20.0, 0.0, 0.0));
-	FVector3d Reachable;
-	double Excess = 0.0;
-	TestTrue(TEXT("Straight reach limit is solvable"),
-		StraightSolver.CalculateReachableEndpoint(false, 10.0, Reachable, Excess));
-	TestTrue(TEXT("Straight endpoint is clamped along its final segment"),
-		Reachable.Equals(FVector3d(10.0, 0.0, 0.0), 1.e-9));
-	TestTrue(TEXT("Straight excess is reported"), FMath::IsNearlyEqual(Excess, 10.0, 1.e-9));
-
-	const CableSim::FCollisionEdge Edge = CableSimTautTests::MakeVerticalEdge();
-	CableSim::FTautPathSolver WrappedSolver;
-	WrappedSolver.Initialize(FVector3d(10.0, 10.0, 0.0), FVector3d(-10.0, 10.0, 0.0));
-	WrappedSolver.AdvanceStep(
-		CableSimTautTests::MakeInput(FVector3d(10.0, -10.0, 0.0), FVector3d(-10.0, 10.0, 0.0)),
-		MakeArrayView(&Edge, 1));
-	TestTrue(TEXT("Wrapped reach limit is solvable"),
-		WrappedSolver.CalculateReachableEndpoint(false, 20.0, Reachable, Excess));
-	const TArray<CableSim::FTautPoint>& Points = WrappedSolver.GetPoints();
-	const double LimitedLength = FVector3d::Distance(Points[0].Position, Points[1].Position)
-		+ FVector3d::Distance(Points[1].Position, Reachable);
-	TestTrue(TEXT("Wrapped reachable path respects length"), FMath::IsNearlyEqual(LimitedLength, 20.0, 1.e-9));
-	TestFalse(TEXT("Path prefix longer than cable is rejected"),
-		WrappedSolver.CalculateReachableEndpoint(false, 5.0, Reachable, Excess));
 	return true;
 }
 

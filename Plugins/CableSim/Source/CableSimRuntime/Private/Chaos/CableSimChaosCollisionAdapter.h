@@ -64,6 +64,7 @@ public:
 		TConstArrayView<CableSim::FParticle> Particles,
 		const FVector3d& StartTarget,
 		const FVector3d& EndTarget,
+		TConstArrayView<FVector3d> TautPathPoints,
 		FCableSimChaosObjectTracker& ObjectTracker,
 		FCableSimChaosSnapshot& OutSnapshot);
 };

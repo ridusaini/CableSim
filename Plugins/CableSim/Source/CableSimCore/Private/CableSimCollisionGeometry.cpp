@@ -1,4 +1,5 @@
 #include "CableSimCollisionGeometry.h"
+#include "Algo/Unique.h"
 
 namespace CableSim
 {
@@ -259,6 +260,14 @@ namespace CableSim
 		TMap<FCollisionFeatureId, FCollisionVertex> Vertices;
 		for (const FCollisionEdge& Edge : OutEdges)
 		{
+			// Only wrapping topology belongs at a rope vertex. Face diagonals and
+			// concave/boundary edges inflated valence and could make an ordinary
+			// triangulated cube look unsupported at a corner.
+			if (Edge.Kind != ECollisionEdgeKind::Convex
+				&& Edge.Kind != ECollisionEdgeKind::NonManifold)
+			{
+				continue;
+			}
 			for (const bool bStart : {true, false})
 			{
 				FCollisionFeatureId VertexId{
@@ -276,7 +285,78 @@ namespace CableSim
 				Vertex.bNonManifold |= Edge.Kind == ECollisionEdgeKind::NonManifold;
 			}
 		}
-		Vertices.GenerateValueArray(OutVertices);
+		TArray<FCollisionVertex> UnclusteredVertices;
+		Vertices.GenerateValueArray(UnclusteredVertices);
+		UnclusteredVertices.Sort([](const FCollisionVertex& First, const FCollisionVertex& Second)
+		{
+			return FCollisionFeatureId::Less(First.Id, Second.Id);
+		});
+
+		// Shapes are compiled independently for edge adjacency, but their
+		// coincident endpoints must form one topological intersection. This is
+		// what prevents a taut line slipping through a numerical crack between
+		// two boxes placed flush in the level editor.
+		TArray<int32> Parents;
+		Parents.SetNumUninitialized(UnclusteredVertices.Num());
+		for (int32 Index = 0; Index < Parents.Num(); ++Index)
+		{
+			Parents[Index] = Index;
+		}
+		auto FindRoot = [&Parents](int32 Index)
+		{
+			while (Parents[Index] != Index)
+			{
+				Parents[Index] = Parents[Parents[Index]];
+				Index = Parents[Index];
+			}
+			return Index;
+		};
+		for (int32 First = 0; First < UnclusteredVertices.Num(); ++First)
+		{
+			for (int32 Second = First + 1; Second < UnclusteredVertices.Num(); ++Second)
+			{
+				if (FVector3d::Distance(
+					UnclusteredVertices[First].Position,
+					UnclusteredVertices[Second].Position) <= FMath::Max(Tolerance, 1.e-9))
+				{
+					const int32 FirstRoot = FindRoot(First);
+					const int32 SecondRoot = FindRoot(Second);
+					if (FirstRoot != SecondRoot)
+					{
+						Parents[FMath::Max(FirstRoot, SecondRoot)] = FMath::Min(FirstRoot, SecondRoot);
+					}
+				}
+			}
+		}
+
+		struct FClusteredVertex
+		{
+			FCollisionVertex Vertex;
+			int32 Count = 0;
+		};
+		TMap<int32, FClusteredVertex> Clusters;
+		for (int32 Index = 0; Index < UnclusteredVertices.Num(); ++Index)
+		{
+			const int32 Root = FindRoot(Index);
+			FClusteredVertex& Cluster = Clusters.FindOrAdd(Root);
+			const FCollisionVertex& Source = UnclusteredVertices[Index];
+			if (Cluster.Count == 0)
+			{
+				Cluster.Vertex = Source;
+				Cluster.Vertex.Position = FVector3d::ZeroVector;
+				Cluster.Vertex.IncidentEdges.Reset();
+			}
+			Cluster.Vertex.Position += Source.Position;
+			Cluster.Vertex.IncidentEdges.Append(Source.IncidentEdges);
+			Cluster.Vertex.bNonManifold |= Source.bNonManifold;
+			++Cluster.Count;
+		}
+		OutVertices.Reset(Clusters.Num());
+		for (TPair<int32, FClusteredVertex>& Pair : Clusters)
+		{
+			Pair.Value.Vertex.Position /= static_cast<double>(Pair.Value.Count);
+			OutVertices.Add(MoveTemp(Pair.Value.Vertex));
+		}
 		OutVertices.Sort([](const FCollisionVertex& First, const FCollisionVertex& Second)
 		{
 			return FCollisionFeatureId::Less(First.Id, Second.Id);
@@ -287,6 +367,7 @@ namespace CableSim
 			{
 				return FCollisionFeatureId::Less(First, Second);
 			});
+			Vertex.IncidentEdges.SetNum(Algo::Unique(Vertex.IncidentEdges));
 			Vertex.bOverValence = Vertex.IncidentEdges.Num() > SafeMaximumIncidentEdges;
 			Diagnostics.OverValenceVertexCount += Vertex.bOverValence ? 1 : 0;
 		}
