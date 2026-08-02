@@ -202,6 +202,7 @@ namespace CableSim
 			Edge.End = FirstTriangle.Vertices[SecondCorner];
 			Edge.GeometryType = FirstTriangle.GeometryType;
 			Edge.bStaticObject = FirstTriangle.bStaticObject;
+			Edge.SurfaceVelocity = FirstTriangle.SurfaceVelocity;
 			Edge.FaceNormal0 = FirstTriangle.CalculateNormal();
 
 			if (Pending.Faces.Num() == 1)

@@ -555,6 +555,7 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 		const FTransform ObjectTransform = Interface.GetTransform(Handle);
 		const bool bStaticObject = !Interface.AreAllKinematic(MakeArrayView(&SingleHandle, 1))
 			&& !Interface.AreAllDynamicOrSleeping(MakeArrayView(&SingleHandle, 1));
+		const int32 ObjectTriangleStart = OutSnapshot.Triangles.Num();
 		Interface.VisitEveryShape(MakeArrayView(&SingleHandle, 1),
 			[&](const Chaos::FConstPhysicsObjectHandle, Chaos::TThreadShapeInstance<Chaos::EThreadContext::External>* Shape)
 			{
@@ -595,6 +596,22 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 				}
 				return OutSnapshot.Diagnostics.ShapeCount >= MaximumShapes;
 			});
+		// Stamp the surface's world velocity onto the triangles this object just added
+		// so friction can carry a resting cable along with a moving platform. Static
+		// objects keep zero. GetVAtPoint includes rotation; a per-triangle centroid is
+		// exact for translation and a close approximation for rotation across one face.
+		if (!bStaticObject)
+		{
+			for (int32 TriangleIndex = ObjectTriangleStart;
+				TriangleIndex < OutSnapshot.Triangles.Num();
+				++TriangleIndex)
+			{
+				CableSim::FCollisionTriangle& Triangle = OutSnapshot.Triangles[TriangleIndex];
+				const FVector Centroid(
+					(Triangle.Vertices[0] + Triangle.Vertices[1] + Triangle.Vertices[2]) / 3.0);
+				Triangle.SurfaceVelocity = FVector3d(Interface.GetVAtPoint(Handle, Centroid));
+			}
+		}
 		if (OutSnapshot.Diagnostics.bFeatureBudgetExceeded)
 		{
 			break;

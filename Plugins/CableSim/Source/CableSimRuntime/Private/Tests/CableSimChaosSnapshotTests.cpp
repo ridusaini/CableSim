@@ -2,6 +2,7 @@
 
 #include "Chaos/CableSimChaosCollisionAdapter.h"
 #include "CableSimComponent.h"
+#include "CableSimContactManifold.h"
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -889,6 +890,103 @@ bool FCableSimTautShadowDoesNotClampReachTest::RunTest(const FString& Parameters
 
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimMovingPlatformVelocityTest,
+	"CableSim.Runtime.Dynamic.MovingPlatformStampsSurfaceVelocity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimMovingPlatformVelocityTest::RunTest(const FString& Parameters)
+{
+	// End-to-end wiring check for moving-surface friction: a real Chaos body with a
+	// linear velocity must have that velocity stamped onto the gathered triangles by
+	// the adapter (GetVAtPoint) and carried into a compiled contact. Combined with the
+	// core MovingSurfaceDragsCable test (contact velocity -> friction drag), this
+	// covers the whole path. Guards the "teleport reports zero velocity" caveat.
+	UWorld* World = GIsEditor ? GWorld : (GEngine ? GEngine->GetWorldContexts()[0].World() : nullptr);
+	if (!TestNotNull(TEXT("A world is available"), World))
+	{
+		return false;
+	}
+	UStaticMesh* CubeMesh = Cast<UStaticMesh>(StaticLoadObject(
+		UStaticMesh::StaticClass(), nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+	if (!TestNotNull(TEXT("Cube mesh loads"), CubeMesh))
+	{
+		return false;
+	}
+	AStaticMeshActor* CubeActor = World->SpawnActor<AStaticMeshActor>();
+	if (!TestNotNull(TEXT("Cube actor spawns"), CubeActor))
+	{
+		return false;
+	}
+	const double Speed = 30.0;
+	UStaticMeshComponent* CubeComponent = CubeActor->GetStaticMeshComponent();
+	CubeComponent->SetMobility(EComponentMobility::Movable);
+	CubeComponent->SetStaticMesh(CubeMesh);
+	CubeComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CubeComponent->SetCollisionObjectType(ECC_WorldDynamic);
+	CubeComponent->SetCollisionResponseToAllChannels(ECR_Block);
+	CubeActor->SetActorEnableCollision(true);
+	CubeActor->SetActorLocation(FVector::ZeroVector);
+	CubeComponent->SetSimulatePhysics(true);
+	CubeComponent->SetEnableGravity(false);
+	CubeComponent->RecreatePhysicsState();
+	CubeComponent->SetPhysicsLinearVelocity(FVector(Speed, 0.0, 0.0));
+	CubeComponent->UpdateBounds();
+
+	const double TopZ = CubeMesh->GetBounds().BoxExtent.Z; // engine cube extent = 50
+	TArray<CableSim::FParticle> Particles;
+	Particles.SetNum(2);
+	Particles[0].Position = FVector3d(0.0, 0.0, TopZ + 2.0);
+	Particles[1].Position = FVector3d(8.0, 0.0, TopZ + 2.0);
+	Particles[0].PreviousPosition = Particles[0].Position;
+	Particles[1].PreviousPosition = Particles[1].Position;
+
+	FCableSimCollisionSettings CollisionSettings;
+	CollisionSettings.Radius = 2.5;
+	FCableSimChaosObjectTracker ObjectTracker;
+	FCableSimChaosSnapshot Snapshot;
+	const bool bGathered = FCableSimChaosCollisionAdapter::GatherSnapshot(
+		World, nullptr, TArray<AActor*>(), CollisionSettings, 0.1,
+		Particles, Particles[0].Position, Particles[1].Position,
+		TArray<FVector3d>(), ObjectTracker, Snapshot);
+
+	double MaxTriangleVelocityX = 0.0;
+	for (const CableSim::FCollisionTriangle& Triangle : Snapshot.Triangles)
+	{
+		MaxTriangleVelocityX = FMath::Max(MaxTriangleVelocityX, FMath::Abs(Triangle.SurfaceVelocity.X));
+	}
+
+	// Compile a contact for the node just above the moving top face and confirm the
+	// velocity reaches the contact the friction solver consumes.
+	CableSim::FManifoldConfig ManifoldConfig;
+	ManifoldConfig.NodeRadius = CollisionSettings.Radius;
+	ManifoldConfig.ActiveBand = 2.0;
+	TArray<CableSim::FContactConstraint> Contacts;
+	CableSim::FContactManifoldCompiler::CompileNodeContacts(
+		0, Particles[0].Position, Particles[0].PreviousPosition,
+		Snapshot.Triangles, Snapshot.Edges, ManifoldConfig, Contacts);
+	double MaxContactVelocityX = 0.0;
+	for (const CableSim::FContactConstraint& Contact : Contacts)
+	{
+		MaxContactVelocityX = FMath::Max(MaxContactVelocityX, FMath::Abs(Contact.SurfaceVelocity.X));
+	}
+
+	AddInfo(FString::Printf(
+		TEXT("moving platform: gathered=%d tris=%d contacts=%d triVelX=%.2f contactVelX=%.2f (speed=%.0f)"),
+		bGathered ? 1 : 0, Snapshot.Triangles.Num(), Contacts.Num(),
+		MaxTriangleVelocityX, MaxContactVelocityX, Speed));
+
+	TestTrue(TEXT("Snapshot gathered the moving cube"), bGathered && Snapshot.Triangles.Num() > 0);
+	TestTrue(TEXT("The adapter stamps the body's velocity onto its triangles"),
+		MaxTriangleVelocityX > Speed * 0.5);
+	TestTrue(TEXT("A contact was compiled against the moving face"), Contacts.Num() > 0);
+	TestTrue(TEXT("The surface velocity reaches the friction contact"),
+		MaxContactVelocityX > Speed * 0.5);
+
+	CubeActor->Destroy();
 	return true;
 }
 

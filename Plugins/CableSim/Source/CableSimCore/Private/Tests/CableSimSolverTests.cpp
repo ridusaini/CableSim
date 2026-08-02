@@ -1589,4 +1589,89 @@ bool FCableSimOverextendedStaysStraightTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimMovingSurfaceTest,
+	"CableSim.Core.Dynamic.MovingSurfaceDragsCable",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimMovingSurfaceTest::RunTest(const FString& Parameters)
+{
+	// A cable resting on a horizontal plane must be carried along when the plane moves
+	// (contact SurfaceVelocity feeds the surface-relative static-friction anchor), and
+	// must stay put when the plane is static. Emits a plane contact per node at z=0
+	// with a chosen SurfaceVelocity; measures the cable's mean X drift.
+	auto RunDrift = [this](const double SurfaceSpeed) -> double
+	{
+		CableSim::FSimulationConfig Config;
+		Config.RestLength = 100.0;
+		Config.NodeSpacing = 25.0;
+		Config.ParticleMass = 0.05;
+		Config.Gravity = FVector3d(0.0, 0.0, -980.0);
+		Config.ConstraintIterations = 64;
+		Config.bEnableFriction = true;
+
+		CableSim::FSolver Solver;
+		Solver.Initialize(FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0), Config);
+
+		double SurfaceVelocityX = 0.0;
+		const CableSim::FContactGenerator ContactGenerator =
+			[&SurfaceVelocityX](
+				const TConstArrayView<CableSim::FParticle> Particles,
+				TArray<CableSim::FContactConstraint>& OutContacts)
+		{
+			for (int32 Index = 0; Index < Particles.Num(); ++Index)
+			{
+				if (Particles[Index].Mode != CableSim::EParticleMode::Dynamic)
+				{
+					continue;
+				}
+				CableSim::FContactConstraint Contact;
+				Contact.FeatureId = 1000 + Index;
+				Contact.ParticleIndex = Index;
+				Contact.Normal = FVector3d(0.0, 0.0, 1.0);
+				Contact.MinimumNormalCoordinate = 0.0; // plane at z = 0
+				Contact.SurfaceVelocity = FVector3d(SurfaceVelocityX, 0.0, 0.0);
+				Contact.FrictionAnchorPosition = Particles[Index].PreviousPosition;
+				Contact.bHasFrictionAnchor = true;
+				OutContacts.Add(Contact);
+			}
+		};
+
+		const CableSim::FStepInput Input = CableSimTests::MakeFreeInput();
+		// Settle onto the plane with a static surface.
+		for (int32 Step = 0; Step < 60; ++Step)
+		{
+			Solver.AdvanceStep(Input, ContactGenerator);
+		}
+		auto MeanX = [&Solver]()
+		{
+			double Sum = 0.0;
+			for (const CableSim::FParticle& Particle : Solver.GetParticles())
+			{
+				Sum += Particle.Position.X;
+			}
+			return Sum / static_cast<double>(Solver.GetParticles().Num());
+		};
+		const double BeforeX = MeanX();
+		// Now move the surface in +X for 2 seconds of sim time.
+		SurfaceVelocityX = SurfaceSpeed;
+		const int32 DragSteps = 120;
+		for (int32 Step = 0; Step < DragSteps; ++Step)
+		{
+			Solver.AdvanceStep(Input, ContactGenerator);
+		}
+		return MeanX() - BeforeX;
+	};
+
+	const double MovingDrift = RunDrift(5.0);   // 5 cm/s for 2 s -> ~10 cm if fully carried
+	const double StaticDrift = RunDrift(0.0);
+	AddInfo(FString::Printf(
+		TEXT("moving-surface drift: moving=%.3f cm (expect ~10), static=%.3f cm"),
+		MovingDrift, StaticDrift));
+	TestTrue(TEXT("A moving surface carries the resting cable along"), MovingDrift > 6.0);
+	TestTrue(TEXT("The cable roughly tracks the surface speed"), MovingDrift < 12.0);
+	TestTrue(TEXT("A static surface leaves the cable in place"), FMath::Abs(StaticDrift) < 1.0);
+	return true;
+}
+
 #endif

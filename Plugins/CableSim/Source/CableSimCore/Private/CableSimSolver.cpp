@@ -778,7 +778,11 @@ namespace CableSim
 			AddOrthonormalNormal(ContactEffectiveNormals[ContactIndex], Normals);
 			if (Contact.bHasFrictionAnchor)
 			{
-				AverageAnchor += Contact.FrictionAnchorPosition;
+				// Carry the static-friction anchor by the surface's motion this step so
+				// the node sticks to the surface's material point, not to world space --
+				// this is what drags a resting cable along a moving platform. Zero for
+				// static surfaces, so their behaviour is unchanged.
+				AverageAnchor += Contact.FrictionAnchorPosition + Contact.SurfaceVelocity * DeltaTime;
 				++AnchorCount;
 			}
 		}

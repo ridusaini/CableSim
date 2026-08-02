@@ -51,6 +51,9 @@ namespace CableSim
 		FCollisionFeatureId Id;
 		ECollisionGeometryType GeometryType = ECollisionGeometryType::Unknown;
 		bool bStaticObject = false;
+		// World velocity of the owning surface at this triangle (zero for static
+		// objects). Lets friction carry a resting cable along a moving platform.
+		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		FVector3d Vertices[3] = {
 			FVector3d::ZeroVector,
 			FVector3d::ZeroVector,
@@ -70,6 +73,8 @@ namespace CableSim
 		FVector3d End = FVector3d::ZeroVector;
 		FVector3d FaceNormal0 = FVector3d::ZeroVector;
 		FVector3d FaceNormal1 = FVector3d::ZeroVector;
+		// Inherited from the edge's first incident triangle; see FCollisionTriangle.
+		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		ECollisionEdgeKind Kind = ECollisionEdgeKind::Degenerate;
 
 		bool IsFinite() const;

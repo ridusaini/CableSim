@@ -96,13 +96,15 @@ namespace CableSim
 		const double MergeOffset = FMath::Max(Config.MergeOffsetTolerance, 0.0);
 
 		auto EmitContact = [ParticleIndex, &NodePreviousPosition, &OutContacts](
-			const FVector3d& Normal, const double MinimumNormalCoordinate, const FCollisionFeatureId& FeatureId)
+			const FVector3d& Normal, const double MinimumNormalCoordinate,
+			const FVector3d& SurfaceVelocity, const FCollisionFeatureId& FeatureId)
 		{
 			FContactConstraint& Contact = OutContacts.AddDefaulted_GetRef();
 			Contact.FeatureId = PackContactFeatureId(FeatureId);
 			Contact.ParticleIndex = ParticleIndex;
 			Contact.Normal = Normal;
 			Contact.MinimumNormalCoordinate = MinimumNormalCoordinate;
+			Contact.SurfaceVelocity = SurfaceVelocity;
 			Contact.FrictionAnchorPosition = NodePreviousPosition;
 			Contact.bHasFrictionAnchor = true;
 		};
@@ -113,6 +115,7 @@ namespace CableSim
 			FVector3d End;
 			FVector3d Normal0;
 			FVector3d Normal1;
+			FVector3d SurfaceVelocity;
 			double Distance = 0.0;
 			FCollisionFeatureId FeatureId;
 		};
@@ -145,7 +148,7 @@ namespace CableSim
 			{
 				continue;
 			}
-			EdgeCandidates.Add({Edge.Start, Edge.End, Normal0, Normal1, Distance, Edge.Id});
+			EdgeCandidates.Add({Edge.Start, Edge.End, Normal0, Normal1, Edge.SurfaceVelocity, Distance, Edge.Id});
 			SuppressedNormals.Add(Normal0);
 			SuppressedNormals.Add(Normal1);
 		}
@@ -166,6 +169,7 @@ namespace CableSim
 			Contact.EdgeEnd = Edge.End;
 			Contact.EdgeRadius = Radius;
 			Contact.bConvexEdge = true;
+			Contact.SurfaceVelocity = Edge.SurfaceVelocity;
 			Contact.FrictionAnchorPosition = NodePreviousPosition;
 			Contact.bHasFrictionAnchor = true;
 		}
@@ -175,6 +179,7 @@ namespace CableSim
 			FVector3d Normal;
 			double PlaneOffset = 0.0;
 			double Distance = 0.0;
+			FVector3d SurfaceVelocity;
 			FCollisionFeatureId FeatureId;
 		};
 		TArray<FCandidate, TInlineAllocator<16>> Candidates;
@@ -241,7 +246,7 @@ namespace CableSim
 				{
 					if (Distance < Candidate.Distance)
 					{
-						Candidate = {Normal, PlaneOffset, Distance, Triangle.Id};
+						Candidate = {Normal, PlaneOffset, Distance, Triangle.SurfaceVelocity, Triangle.Id};
 					}
 					bMerged = true;
 					break;
@@ -249,7 +254,7 @@ namespace CableSim
 			}
 			if (!bMerged)
 			{
-				Candidates.Add({Normal, PlaneOffset, Distance, Triangle.Id});
+				Candidates.Add({Normal, PlaneOffset, Distance, Triangle.SurfaceVelocity, Triangle.Id});
 			}
 		}
 
@@ -261,7 +266,7 @@ namespace CableSim
 		for (int32 Index = 0; Index < PlaneCount; ++Index)
 		{
 			const FCandidate& Candidate = Candidates[Index];
-			EmitContact(Candidate.Normal, Candidate.PlaneOffset + Radius, Candidate.FeatureId);
+			EmitContact(Candidate.Normal, Candidate.PlaneOffset + Radius, Candidate.SurfaceVelocity, Candidate.FeatureId);
 		}
 	}
 }
