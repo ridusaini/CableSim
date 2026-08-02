@@ -58,10 +58,14 @@ namespace CableSim
 		double ContactActiveBand = 1.0;
 		// Talk: "if you have a rope that's almost taut, it basically feels like
 		// it would never converge" without multigrid. 0 disables it (flat
-		// Gauss-Seidel sweep only); below MultigridMinimumParticles it is a
-		// cheap no-op, since a short cable's fine sweep already converges fast.
+		// Gauss-Seidel sweep only). The gate is deliberately low: a near-taut
+		// cable does NOT converge quickly at typical resolutions -- measured, a
+		// 63-node taut cable holds ~45cm of sag at 64 flat iterations and still
+		// 14cm at 512 -- so multigrid must run for ordinary cables, not only very
+		// long ones. SolveMultigrid self-no-ops below ~4 particles (no coarse
+		// stride exists), so the gate only excludes trivially short straps.
 		int32 MultigridIterations = 4;
-		int32 MultigridMinimumParticles = 64;
+		int32 MultigridMinimumParticles = 8;
 
 		bool Equals(const FSimulationConfig& Other, double Tolerance = 1.e-9) const;
 	};
@@ -130,7 +134,6 @@ namespace CableSim
 		int32 ContactCount = 0;
 		int32 GuideConstraintCount = 0;
 		double RestLength = 0.0;
-		double EffectiveSolveLength = 0.0;
 		double EndpointDistance = 0.0;
 		double StrainRatio = 0.0;
 		double MaximumSegmentError = 0.0;
@@ -150,7 +153,6 @@ namespace CableSim
 		FSimulationConfig Config;
 		FStepResult LastStepResult;
 		double RestSegmentLength = 0.0;
-		double EffectiveSolveLength = 0.0;
 		uint64 StepIndex = 0;
 	};
 
@@ -179,7 +181,6 @@ namespace CableSim
 		const TArray<FParticle>& GetParticles() const { return Particles; }
 		const FSimulationConfig& GetConfig() const { return Config; }
 		double GetRestLength() const { return Config.RestLength; }
-		double GetEffectiveSolveLength() const { return EffectiveSolveLength; }
 		double GetRestSegmentLength() const { return RestSegmentLength; }
 		uint64 GetStepIndex() const { return StepIndex; }
 		const FStepResult& GetLastStepResult() const { return LastStepResult; }
@@ -239,8 +240,6 @@ namespace CableSim
 		TArray<double> ParticleStaticFrictionCorrections;
 		TArray<double> ParticleDynamicFrictionVelocityChanges;
 		double RestSegmentLength = 0.0;
-		double EffectiveSolveLength = 0.0;
-		double SolveSegmentLength = 0.0;
 		uint64 StepIndex = 0;
 		bool bSuspendedAfterFailure = false;
 	};

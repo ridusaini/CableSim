@@ -80,8 +80,6 @@
 			return ECableSimTautStatus::NonManifoldTopology;
 		case CableSim::ETautStatus::TopologyOverValence:
 			return ECableSimTautStatus::TopologyOverValence;
-		case CableSim::ETautStatus::MovementBudgetExceeded:
-			return ECableSimTautStatus::MovementBudgetExceeded;
 		case CableSim::ETautStatus::CollisionBudgetExceeded:
 			return ECableSimTautStatus::CollisionBudgetExceeded;
 		case CableSim::ETautStatus::TopologyBudgetExceeded:
@@ -153,18 +151,6 @@
 		}
 		return Points.Last().Position;
 	}
-
-	uint32 GetCollisionSignature(const FCableSimCollisionSettings& Settings)
-	{
-		uint32 Hash = GetTypeHash(Settings.bEnableWorldCollision);
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.Radius));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.SkinWidth));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.MaximumContactsPerParticle));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactReleaseDistance));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactNormalToleranceDegrees));
-		Hash = HashCombineFast(Hash, GetTypeHash(Settings.ContactPersistenceSteps));
-		return HashCombineFast(Hash, GetTypeHash(static_cast<uint8>(Settings.Channel.GetValue())));
-	}
 }
 
 struct FCableSimRuntimeState
@@ -200,7 +186,6 @@ struct FCableSimRuntimeState
 	bool bTautWasActive = false;
 	FVector3d LastAcceptedTautEndpoints[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
 	bool bHasLastAcceptedTautEndpoint[2] = {false, false};
-	uint32 AppliedCollisionSignature = 0;
 };
 
 UCableSimComponent::UCableSimComponent()
@@ -307,7 +292,6 @@ void UCableSimComponent::ReinitializeSimulation()
 	RuntimeState->bTautWasActive = TautSettings.Mode != ECableSimTautMode::Disabled;
 	RuntimeState->bHasLastAcceptedTautEndpoint[0] = false;
 	RuntimeState->bHasLastAcceptedTautEndpoint[1] = false;
-	RuntimeState->AppliedCollisionSignature = GetCollisionSignature(CollisionSettings);
 
 	const FVector3d StartPosition = ResolveInitialPosition(StartEndpoint, ECableSimEndpoint::Start);
 	const FVector3d EndPosition = ResolveInitialPosition(EndEndpoint, ECableSimEndpoint::End);
@@ -523,7 +507,6 @@ FCableSimStatus UCableSimComponent::GetSimulationStatus() const
 	Status.StartEndpointStatus = RuntimeState->EndpointStatuses[0];
 	Status.EndEndpointStatus = RuntimeState->EndpointStatuses[1];
 	Status.RestLength = Result.RestLength;
-	Status.EffectiveSolveLength = Result.EffectiveSolveLength;
 	Status.EndpointDistance = Result.EndpointDistance;
 	Status.StrainRatio = Result.StrainRatio;
 	Status.MaximumSegmentError = Result.MaximumSegmentError;
@@ -639,11 +622,6 @@ void UCableSimComponent::SynchronizeConfiguration()
 	{
 		RuntimeState->PendingConfig = CurrentConfig;
 		RuntimeState->bConfigPending = true;
-	}
-	const uint32 CollisionSignature = GetCollisionSignature(CollisionSettings);
-	if (CollisionSignature != RuntimeState->AppliedCollisionSignature)
-	{
-		RuntimeState->AppliedCollisionSignature = CollisionSignature;
 	}
 }
 

@@ -199,6 +199,35 @@ namespace CableSim
 			return LastResult;
 		};
 
+		// Talk's degradation philosophy: running out of iteration budget should not
+		// freeze the whole path. If the path we have is already collision-free, emit
+		// it as a best effort -- the other contacts hold the rope up and subsequent
+		// steps keep straightening it. Only a path that actually clips geometry falls
+		// back to the last good state (the FallbackStatus), which self-heals next step.
+		auto EmitBestEffort = [this, &Input, &Scene, &MovementIterations, &CollisionPhases, &TopologyEvents, &Fail](
+			const ETautStatus FallbackStatus)
+		{
+			// Only ship a best-effort path whose endpoints actually reached their
+			// requested targets and that is collision-free. If an endpoint is still
+			// mid-advance around an obstacle (budget ran out before it arrived), the
+			// path is genuinely incomplete -- hold the last good state and let the
+			// next step continue, exactly as before.
+			const bool bEndpointsAtTargets =
+				Points[0].Position.Equals(Input.StartTarget, Config.TopologyTolerance)
+				&& Points.Last().Position.Equals(Input.EndTarget, Config.TopologyTolerance);
+			if (!bEndpointsAtTargets || !ValidateState(&Scene))
+			{
+				return Fail(FallbackStatus);
+			}
+			++StepIndex;
+			UpdateResult(
+				HasUsableEdge(Scene, Config.TopologyTolerance)
+					? ETautStatus::Ready : ETautStatus::NoRelevantGeometry,
+				MovementIterations, CollisionPhases + 1, TopologyEvents);
+			LastResult.bPathCollisionFree = true;
+			return LastResult;
+		};
+
 		for (const FTautPoint& Point : Points)
 		{
 			if (Point.Type == ETautPointType::EdgeContact && !FindEdge(Point.FeatureId, Scene))
@@ -221,6 +250,87 @@ namespace CableSim
 			}
 			Targets[0] = Input.StartTarget;
 			Targets.Last() = Input.EndTarget;
+
+			// 2D unroll acceleration (the talk's movement-phase trick): a run of
+			// consecutive edge contacts on PARALLEL edges is solved in closed form by
+			// unrolling the edges into a plane and drawing one straight line, instead of
+			// Gauss-Seidel crawling as the edges converge. A correct unroll is already a
+			// fixed point of the iteration below, so this only seeds a better start;
+			// skew / non-parallel runs simply fall through to that iteration.
+			for (int32 RunStart = 1; RunStart + 1 < Points.Num(); )
+			{
+				if (Points[RunStart].Type != ETautPointType::EdgeContact)
+				{
+					++RunStart;
+					continue;
+				}
+				const FCollisionEdge* FirstEdge = FindEdge(Points[RunStart].FeatureId, Scene);
+				if (!FirstEdge)
+				{
+					++RunStart;
+					continue;
+				}
+				const FVector3d Direction = (FirstEdge->End - FirstEdge->Start).GetSafeNormal();
+				TArray<const FCollisionEdge*, TInlineAllocator<8>> RunEdges;
+				RunEdges.Add(FirstEdge);
+				int32 RunEnd = RunStart;
+				while (RunEnd + 2 < Points.Num() && Points[RunEnd + 1].Type == ETautPointType::EdgeContact)
+				{
+					const FCollisionEdge* NextEdge = FindEdge(Points[RunEnd + 1].FeatureId, Scene);
+					if (!NextEdge)
+					{
+						break;
+					}
+					const FVector3d NextDirection = (NextEdge->End - NextEdge->Start).GetSafeNormal();
+					if (FMath::Abs(FVector3d::DotProduct(NextDirection, Direction)) < 1.0 - 1.e-4)
+					{
+						break;
+					}
+					RunEdges.Add(NextEdge);
+					++RunEnd;
+				}
+				if (RunEnd > RunStart && !Direction.IsNearlyZero())
+				{
+					const FVector3d A = Targets[RunStart - 1];
+					const FVector3d B = Targets[RunEnd + 1];
+					auto PerpendicularDistance = [&Direction](const FVector3d& Point, const FVector3d& Origin)
+					{
+						const FVector3d Relative = Point - Origin;
+						return (Relative - Direction * FVector3d::DotProduct(Relative, Direction)).Length();
+					};
+					// Unrolled horizontal position of each edge: cumulative perpendicular
+					// distance walked from A across the parallel edges to B.
+					TArray<double, TInlineAllocator<8>> Horizontal;
+					Horizontal.Add(PerpendicularDistance(A, RunEdges[0]->Start));
+					for (int32 Index = 1; Index < RunEdges.Num(); ++Index)
+					{
+						Horizontal.Add(Horizontal[Index - 1]
+							+ PerpendicularDistance(RunEdges[Index]->Start, RunEdges[Index - 1]->Start));
+					}
+					const double TotalHorizontal = Horizontal.Last()
+						+ PerpendicularDistance(B, RunEdges.Last()->Start);
+					const double AlongSpan = FVector3d::DotProduct(B - A, Direction);
+					if (TotalHorizontal > Config.TopologyTolerance)
+					{
+						for (int32 Index = 0; Index < RunEdges.Num(); ++Index)
+						{
+							const FCollisionEdge* Edge = RunEdges[Index];
+							const double AlongTarget = AlongSpan * Horizontal[Index] / TotalHorizontal;
+							const double AlongStart = FVector3d::DotProduct(Edge->Start - A, Direction);
+							const double AlongEnd = FVector3d::DotProduct(Edge->End - A, Direction);
+							const double Denominator = AlongEnd - AlongStart;
+							if (FMath::Abs(Denominator) <= Config.TopologyTolerance)
+							{
+								continue;
+							}
+							const double Parameter = FMath::Clamp(
+								(AlongTarget - AlongStart) / Denominator, 0.0, 1.0);
+							Targets[RunStart + Index] = FMath::Lerp(Edge->Start, Edge->End, Parameter);
+						}
+					}
+				}
+				RunStart = RunEnd + 1;
+			}
 
 			bool bMovementConverged = Points.Num() == 2;
 			for (int32 LocalIteration = 0;
@@ -273,10 +383,12 @@ namespace CableSim
 					break;
 				}
 			}
-			if (!bMovementConverged)
-			{
-				return Fail(ETautStatus::MovementBudgetExceeded);
-			}
+			// Accept a partially-straightened movement phase rather than freezing:
+			// the collision sweep and final ValidateState below still gate the path,
+			// and later steps keep straightening it (talk: "as straight as it can go,
+			// given the collision edges"). bMovementConverged stays the early break
+			// flag only.
+			(void)bMovementConverged;
 
 			bool bCollisionAdded = false;
 			for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
@@ -336,11 +448,11 @@ namespace CableSim
 				}
 				if (Points.Num() >= Config.MaximumPathPoints)
 				{
-					return Fail(ETautStatus::TopologyBudgetExceeded);
+					return EmitBestEffort(ETautStatus::TopologyBudgetExceeded);
 				}
 				if (++TopologyEvents > Config.MaximumTopologyEvents)
 				{
-					return Fail(ETautStatus::TopologyBudgetExceeded);
+					return EmitBestEffort(ETautStatus::TopologyBudgetExceeded);
 				}
 				Points[PointIndex].Position = FMath::Lerp(
 					MovingStart, MovingTarget, BestHit.MovementTime);
@@ -448,47 +560,69 @@ namespace CableSim
 					continue;
 				}
 
-				const FCollisionEdge* BestEdge = nullptr;
-				FVector3d BestPosition = Vertex->Position;
-				double BestParameter = 0.0;
-				double BestLength = TNumericLimits<double>::Max();
+				// Resolve the vertex to the shortest collision-free local path. Staying on
+				// the vertex (a caught rope -- the talk's stable inner corner) is the
+				// baseline; sliding onto a single incident edge (move-along) wins only if it
+				// is genuinely shorter and stays collision-free. Side edges never enter the
+				// shortest path, so they drop out for free -- the talk's inner/side outcomes
+				// from one shortest-path rule that is testable as an invariant.
+				constexpr int32 ResolveStay = 0;
+				constexpr int32 ResolveSingle = 1;
+				auto EdgeParameterOf = [](const FCollisionEdge& Edge, const FVector3d& Position, const double Tolerance)
+				{
+					const double Length = FVector3d::Distance(Edge.Start, Edge.End);
+					return Length > Tolerance ? FVector3d::Distance(Edge.Start, Position) / Length : 0.0;
+				};
+
+				int32 BestResolution = ResolveStay;
+				double BestLength = FVector3d::Distance(Previous, Vertex->Position)
+					+ FVector3d::Distance(Vertex->Position, Next);
+				const FCollisionEdge* BestEdgeA = nullptr;
+				FVector3d BestPosA = Vertex->Position;
+
 				for (const FCollisionEdge* Candidate : Candidates)
 				{
 					FVector3d Position;
 					double Parameter = 0.0;
 					if (!CalculateContactPosition(
-						Previous, Next, *Candidate, Config.TopologyTolerance,
-						Position, Parameter))
+						Previous, Next, *Candidate, Config.TopologyTolerance, Position, Parameter)
+						|| !SegmentIsCollisionFree(Previous, Position, Scene, Config.TopologyTolerance, Config.ParametricTolerance)
+						|| !SegmentIsCollisionFree(Position, Next, Scene, Config.TopologyTolerance, Config.ParametricTolerance))
 					{
 						continue;
 					}
 					const double Length = FVector3d::Distance(Previous, Position)
 						+ FVector3d::Distance(Position, Next);
-					if (!BestEdge || Length < BestLength - Config.TopologyTolerance
-						|| (FMath::IsNearlyEqual(Length, BestLength, Config.TopologyTolerance)
-							&& FCollisionFeatureId::Less(Candidate->Id, BestEdge->Id)))
+					const bool bShorter = Length < BestLength - Config.TopologyTolerance;
+					const bool bTieBreak = BestResolution == ResolveSingle && BestEdgeA
+						&& FMath::IsNearlyEqual(Length, BestLength, Config.TopologyTolerance)
+						&& FCollisionFeatureId::Less(Candidate->Id, BestEdgeA->Id);
+					if (bShorter || bTieBreak)
 					{
-						BestEdge = Candidate;
-						BestPosition = Position;
-						BestParameter = Parameter;
+						BestResolution = ResolveSingle;
 						BestLength = Length;
+						BestEdgeA = Candidate;
+						BestPosA = Position;
 					}
 				}
-				if (BestEdge)
+
+				if (BestResolution == ResolveSingle && BestEdgeA)
 				{
 					Point.Type = ETautPointType::EdgeContact;
-					Point.FeatureId = BestEdge->Id;
-					Point.Position = BestPosition;
-					Point.EdgeParameter = BestParameter;
+					Point.FeatureId = BestEdgeA->Id;
+					Point.Position = BestPosA;
+					Point.EdgeParameter = EdgeParameterOf(*BestEdgeA, BestPosA, Config.TopologyTolerance);
 					bTopologyChanged = true;
 					break;
 				}
+				// ResolveStay: the caught rope stays on the vertex; nothing changes.
+				Point.Position = Vertex->Position;
 			}
 			if (bTopologyChanged)
 			{
 				if (++TopologyEvents > Config.MaximumTopologyEvents)
 				{
-					return Fail(ETautStatus::TopologyBudgetExceeded);
+					return EmitBestEffort(ETautStatus::TopologyBudgetExceeded);
 				}
 				continue;
 			}
@@ -506,7 +640,7 @@ namespace CableSim
 			return LastResult;
 		}
 
-		return Fail(ETautStatus::CollisionBudgetExceeded);
+		return EmitBestEffort(ETautStatus::CollisionBudgetExceeded);
 	}
 
 	FTautStateSnapshot FTautPathSolver::CaptureState() const

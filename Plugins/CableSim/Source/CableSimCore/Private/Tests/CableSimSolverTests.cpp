@@ -282,16 +282,27 @@ bool FCableSimOverextensionTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Start stays attached"), Solver.GetParticles()[0].Position.Equals(Start, 0.1));
 	TestTrue(TEXT("End stays attached"), Solver.GetParticles().Last().Position.Equals(FarEnd, 0.1));
 	TestEqual(TEXT("Physical rest length is unchanged"), Result.RestLength, 100.0);
-	TestEqual(TEXT("Effective length follows separation"), Result.EffectiveSolveLength, 1000.0);
 	TestTrue(TEXT("Strain is reported"), FMath::IsNearlyEqual(Result.StrainRatio, 9.0, 1.e-9));
+	// Inextensible: the rope does not grow to fit, so each segment is genuinely
+	// over-stretched (rest segment 10cm, actual ~100cm) -- the segment error now
+	// reflects real strain instead of the rest length silently expanding to absorb it.
+	TestTrue(TEXT("Segment error reflects the stretch"), Result.MaximumSegmentError > 50.0);
+	// ...but with both ends pinned it still settles to a straight line.
+	const FVector3d Axis = (FarEnd - Start).GetSafeNormal();
+	double MaximumPerpendicular = 0.0;
 	for (const CableSim::FParticle& Particle : Solver.GetParticles())
 	{
 		TestFalse(TEXT("Position remains finite"), Particle.Position.ContainsNaN());
+		const FVector3d Offset = Particle.Position - Start;
+		MaximumPerpendicular = FMath::Max(
+			MaximumPerpendicular,
+			(Offset - Axis * FVector3d::DotProduct(Offset, Axis)).Length());
 	}
+	TestTrue(TEXT("Overextended cable stays straight"), MaximumPerpendicular < 0.5);
 
 	Result = Solver.AdvanceStep(CableSimTests::MakeFixedInput(Start, FVector3d(100.0, 0.0, 0.0)));
 	TestEqual(TEXT("Feasible state recovers"), Result.Status, CableSim::ESimulationStatus::Ready);
-	TestEqual(TEXT("Effective length returns to rest length"), Result.EffectiveSolveLength, 100.0);
+	TestTrue(TEXT("Strain clears when back in reach"), FMath::IsNearlyEqual(Result.StrainRatio, 0.0, 1.e-9));
 	return true;
 }
 
@@ -1515,6 +1526,66 @@ bool FCableSimMultigridDoesNotPullThroughContactTest::RunTest(const FString& Par
 	AddInfo(FString::Printf(TEXT("Minimum node height over %d steps: %.4f (plane at %.1f)"), 300, MinimumZ, PlaneHeight));
 	TestTrue(TEXT("No node is pulled through the plane by the coarse multigrid pass"),
 		MinimumZ >= PlaneHeight - 0.5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimOverextendedStaysStraightTest,
+	"CableSim.Core.Convergence.OverextendedCableStaysStraight",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimOverextendedStaysStraightTest::RunTest(const FString& Parameters)
+{
+	// A both-ends-kinematic cable pulled to or past its rest length must settle to a
+	// straight taut line under gravity, at a normal cable resolution -- not hang with
+	// tens of cm of sag. This guards the multigrid gate: with the default gate this
+	// 63-node cable gets multigrid, without which a near-taut cable never converges
+	// (measured ~45cm sag off vs ~2.7cm on). Sag = max perpendicular distance of any
+	// node from the straight Start->End line. Uses the shipped default multigrid
+	// config so it fails if the gate regresses back above typical node counts.
+	const double RestLength = 400.0;
+
+	auto MaximumSag = [this, RestLength](const double SeparationRatio) -> double
+	{
+		CableSim::FSimulationConfig Config;
+		Config.RestLength = RestLength;
+		Config.NodeSpacing = 6.5; // 62 segments -> 63 nodes, a typical resolution
+		Config.ParticleMass = 0.05;
+		Config.Gravity = FVector3d(0.0, 0.0, -980.665);
+		Config.VelocityDamping = 0.01;
+		Config.DistanceOverRelaxation = 1.015;
+		Config.BendingStepStrength = 0.20;
+		Config.ConstraintIterations = 64;
+		// MultigridIterations / MultigridMinimumParticles left at their shipped
+		// defaults on purpose -- this test validates the default gate.
+
+		const FVector3d Start(0.0, 0.0, 0.0);
+		const FVector3d End(RestLength * SeparationRatio, 0.0, 0.0);
+		CableSim::FSolver Solver;
+		Solver.Initialize(Start, End, Config);
+		const CableSim::FStepInput Input = CableSimTests::MakeFixedInput(Start, End);
+		for (int32 Step = 0; Step < 900; ++Step)
+		{
+			Solver.AdvanceStep(Input);
+		}
+		const FVector3d Axis = (End - Start).GetSafeNormal();
+		double MaxSag = 0.0;
+		for (const CableSim::FParticle& Particle : Solver.GetParticles())
+		{
+			const FVector3d Offset = Particle.Position - Start;
+			const FVector3d Perp = Offset - Axis * FVector3d::DotProduct(Offset, Axis);
+			MaxSag = FMath::Max(MaxSag, Perp.Length());
+		}
+		return MaxSag;
+	};
+
+	const double SagTaut = MaximumSag(1.00);
+	const double SagOverextended = MaximumSag(1.20);
+	AddInfo(FString::Printf(
+		TEXT("63-node cable sag: taut(100%%)=%.3f cm, overextended(120%%)=%.3f cm"),
+		SagTaut, SagOverextended));
+	TestTrue(TEXT("Taut cable settles nearly straight"), SagTaut < 5.0);
+	TestTrue(TEXT("Overextended cable settles nearly straight"), SagOverextended < 5.0);
 	return true;
 }
 

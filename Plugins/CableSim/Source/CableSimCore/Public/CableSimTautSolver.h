@@ -14,7 +14,6 @@ namespace CableSim
 		PathBlocked,
 		NonManifoldTopology,
 		TopologyOverValence,
-		MovementBudgetExceeded,
 		CollisionBudgetExceeded,
 		TopologyBudgetExceeded,
 		InvalidConfiguration,

@@ -69,8 +69,6 @@ namespace CableSim
 			1,
 			MaximumSegmentCount);
 		RestSegmentLength = Config.RestLength / static_cast<double>(SegmentCount);
-		EffectiveSolveLength = Config.RestLength;
-		SolveSegmentLength = RestSegmentLength;
 		Particles.SetNum(SegmentCount + 1);
 
 		for (int32 Index = 0; Index <= SegmentCount; ++Index)
@@ -89,7 +87,6 @@ namespace CableSim
 		LastStepResult.Status = ESimulationStatus::Ready;
 		LastStepResult.ParticleCount = Particles.Num();
 		LastStepResult.RestLength = Config.RestLength;
-		LastStepResult.EffectiveSolveLength = EffectiveSolveLength;
 		bSuspendedAfterFailure = false;
 		return true;
 	}
@@ -108,8 +105,6 @@ namespace CableSim
 		ParticleStaticFrictionCorrections.Reset();
 		ParticleDynamicFrictionVelocityChanges.Reset();
 		RestSegmentLength = 0.0;
-		EffectiveSolveLength = 0.0;
-		SolveSegmentLength = 0.0;
 		StepIndex = 0;
 		bSuspendedAfterFailure = false;
 	}
@@ -139,8 +134,6 @@ namespace CableSim
 			Particle.InverseMass = InverseMass;
 		}
 		RestSegmentLength = Config.RestLength / static_cast<double>(Particles.Num() - 1);
-		EffectiveSolveLength = FMath::Max(EffectiveSolveLength, Config.RestLength);
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
 		bSuspendedAfterFailure = false;
 		return true;
 	}
@@ -177,10 +170,11 @@ namespace CableSim
 		const double EndpointDistance = FVector3d::Distance(
 			Input.StartEndpoint.TargetPosition,
 			Input.EndEndpoint.TargetPosition);
-		EffectiveSolveLength = bBothEndpointsKinematic
-			? FMath::Max(Config.RestLength, EndpointDistance)
-			: Config.RestLength;
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
+		// Inextensible rope: segments always target the rest segment length, so
+		// pulling both kinematic endpoints past the rest length shows up as genuine
+		// strain (a straight, over-stretched line) instead of the rope silently
+		// growing to fit. Reported via StrainRatio / Overextended below; stopping a
+		// driven endpoint at max reach is the taut layer's responsibility.
 
 		const double DampingMultiplier = FMath::Clamp(1.0 - Config.VelocityDamping, 0.0, 1.0);
 		for (FParticle& Particle : Particles)
@@ -340,7 +334,6 @@ namespace CableSim
 		Snapshot.Config = Config;
 		Snapshot.LastStepResult = LastStepResult;
 		Snapshot.RestSegmentLength = RestSegmentLength;
-		Snapshot.EffectiveSolveLength = EffectiveSolveLength;
 		Snapshot.StepIndex = StepIndex;
 		return Snapshot;
 	}
@@ -348,9 +341,7 @@ namespace CableSim
 	bool FSolver::RestoreState(const FStateSnapshot& Snapshot)
 	{
 		if (Snapshot.Particles.Num() < 2 || !IsValidConfig(Snapshot.Config)
-			|| !FMath::IsFinite(Snapshot.RestSegmentLength) || Snapshot.RestSegmentLength <= 0.0
-			|| !FMath::IsFinite(Snapshot.EffectiveSolveLength)
-			|| Snapshot.EffectiveSolveLength < Snapshot.Config.RestLength)
+			|| !FMath::IsFinite(Snapshot.RestSegmentLength) || Snapshot.RestSegmentLength <= 0.0)
 		{
 			return false;
 		}
@@ -370,8 +361,6 @@ namespace CableSim
 		Config = SanitizeConfig(Snapshot.Config);
 		LastStepResult = Snapshot.LastStepResult;
 		RestSegmentLength = Snapshot.RestSegmentLength;
-		EffectiveSolveLength = Snapshot.EffectiveSolveLength;
-		SolveSegmentLength = EffectiveSolveLength / static_cast<double>(Particles.Num() - 1);
 		StepIndex = Snapshot.StepIndex;
 		bSuspendedAfterFailure = false;
 		return true;
@@ -531,7 +520,7 @@ namespace CableSim
 		// the rest length by the index span lets this same function serve a
 		// multigrid coarse pair (e.g. every 8th particle) with no separate
 		// formula -- for an adjacent pair (span 1) it's identical to before.
-		const double SpanRestLength = static_cast<double>(SecondIndex - FirstIndex) * SolveSegmentLength;
+		const double SpanRestLength = static_cast<double>(SecondIndex - FirstIndex) * RestSegmentLength;
 		const double Error = Distance - SpanRestLength / Config.DistanceOverRelaxation;
 		// A coarse multigrid pass must never push a span apart: a curled or
 		// sagging path reads as "compressed" in straight-line distance even
@@ -672,10 +661,10 @@ namespace CableSim
 		}
 
 		const double FreeAngle = FMath::Clamp(
-			Config.FreeBendAngleRadiansPerMeter * (SolveSegmentLength / 100.0),
+			Config.FreeBendAngleRadiansPerMeter * (RestSegmentLength / 100.0),
 			0.0,
 			UE_PI);
-		const double FreeOffset = SolveSegmentLength * FMath::Cos((UE_PI - FreeAngle) * 0.5);
+		const double FreeOffset = RestSegmentLength * FMath::Cos((UE_PI - FreeAngle) * 0.5);
 		const double Error = FMath::Max(OffsetLength - FreeOffset, 0.0);
 		if (Error <= 0.0)
 		{
@@ -1094,7 +1083,7 @@ namespace CableSim
 				MaximumError,
 				FMath::Abs(FVector3d::Distance(
 					Particles[SegmentIndex].Position,
-					Particles[SegmentIndex + 1].Position) - SolveSegmentLength));
+					Particles[SegmentIndex + 1].Position) - RestSegmentLength));
 		}
 		return MaximumError;
 	}
@@ -1148,7 +1137,6 @@ namespace CableSim
 		LastStepResult.ContactCount = Contacts.Num();
 		LastStepResult.GuideConstraintCount = Guides.Num();
 		LastStepResult.RestLength = Config.RestLength;
-		LastStepResult.EffectiveSolveLength = EffectiveSolveLength;
 		LastStepResult.EndpointDistance = EndpointDistance;
 		LastStepResult.StrainRatio = Config.RestLength > 0.0
 			? FMath::Max(EndpointDistance / Config.RestLength - 1.0, 0.0)

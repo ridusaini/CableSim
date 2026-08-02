@@ -61,7 +61,6 @@ enum class ECableSimTautStatus : uint8
 	PathBlocked,
 	NonManifoldTopology,
 	TopologyOverValence,
-	MovementBudgetExceeded,
 	CollisionBudgetExceeded,
 	TopologyBudgetExceeded,
 	SnapshotFailed,
@@ -166,9 +165,6 @@ struct CABLESIMRUNTIME_API FCableSimCollisionSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "90.0", Units = "deg"))
 	double ContactNormalToleranceDegrees = 15.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0", ClampMax = "8"))
-	int32 ContactPersistenceSteps = 2;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	TEnumAsByte<ECollisionChannel> Channel = ECC_WorldStatic;
@@ -406,9 +402,6 @@ struct CABLESIMRUNTIME_API FCableSimStatus
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double RestLength = 0.0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
-	double EffectiveSolveLength = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable", meta = (Units = "cm"))
 	double EndpointDistance = 0.0;
