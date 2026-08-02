@@ -810,6 +810,111 @@ bool FCableSimTautRecoversAfterContactAgesOutOfRangeTest::RunTest(const FString&
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautOverextensionHomotopyTest,
+	"CableSim.Runtime.Taut.OverextensionKeepsHomotopy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautOverextensionHomotopyTest::RunTest(const FString& Parameters)
+{
+	// Wind a wrapped cable the long way around a real box corner, then over-extend it.
+	// The taut path must not teleport across the box to a shorter direct line while the
+	// rope is wound: a wrap may only leave continuously (contacts fall one at a time),
+	// never a multi-contact collapse to the straight endpoint distance in a single step.
+	UWorld* World = GIsEditor ? GWorld : (GEngine ? GEngine->GetWorldContexts()[0].World() : nullptr);
+	if (!TestNotNull(TEXT("Editor world is available"), World))
+	{
+		return false;
+	}
+	UStaticMesh* CubeMesh = Cast<UStaticMesh>(StaticLoadObject(
+		UStaticMesh::StaticClass(), nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+	if (!TestNotNull(TEXT("Cube mesh loads"), CubeMesh))
+	{
+		return false;
+	}
+	AStaticMeshActor* CubeActor = World->SpawnActor<AStaticMeshActor>();
+	UStaticMeshComponent* CubeComponent = CubeActor->GetStaticMeshComponent();
+	CubeComponent->SetMobility(EComponentMobility::Static);
+	CubeComponent->SetStaticMesh(CubeMesh);
+	CubeComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	CubeComponent->SetCollisionObjectType(ECC_WorldStatic);
+	CubeComponent->SetCollisionResponseToAllChannels(ECR_Block);
+	CubeActor->SetActorEnableCollision(true);
+	CubeActor->SetActorScale3D(FVector(0.2, 0.2, 0.2));
+	CubeActor->SetActorLocation(FVector(0.0, 0.0, 10.0));
+	CubeComponent->RecreatePhysicsState();
+
+	AActor* CableOwner = World->SpawnActor<AActor>();
+	UCableSimComponent* Cable = NewObject<UCableSimComponent>(CableOwner);
+	Cable->SimulationSettings.RestLength = 400.0;
+	Cable->SimulationSettings.NodeSpacing = 5.0;
+	Cable->SimulationSettings.Gravity = FVector::ZeroVector;
+	Cable->CollisionSettings.bEnableWorldCollision = true;
+	Cable->CollisionSettings.Radius = 2.5;
+	Cable->TautSettings.Mode = ECableSimTautMode::Enabled;
+	Cable->TautSettings.ConstrainedEndpoint = ECableSimEndpoint::End;
+	Cable->StartEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
+	Cable->EndEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
+	const FVector WrapStart(-60.0, -65.0, 10.0);
+	const FVector WrapEnd(60.0, 55.0, 10.0);
+	Cable->StartEndpoint.WorldTarget = WrapStart;
+	Cable->EndEndpoint.WorldTarget = WrapEnd;
+	Cable->RegisterComponent();
+	Cable->ReinitializeSimulation();
+	for (int32 Step = 0; Step < 6; ++Step)
+	{
+		Cable->StepSimulation(1);
+	}
+	AddInfo(FString::Printf(TEXT("established: contacts=%d pathLen=%.1f"),
+		Cable->GetTautDiagnostics().ContactCount, Cable->GetTautDiagnostics().PathLength));
+
+	// Arc the End endpoint on a circle all the way around the box, winding the rope,
+	// then bring it back toward Start's (clear, direct) side. Once wound, shrink the
+	// rest length so the wound path is over-extended; a clear short direct chord then
+	// tempts reach to drop the wrap.
+	int32 AbruptDrop = 0;
+	int32 MaxContacts = 0;
+	int32 PreviousContacts = Cable->GetTautDiagnostics().ContactCount;
+	const double Radius = 78.0;
+	const double StartAngle = FMath::Atan2(WrapEnd.Y, WrapEnd.X);
+	const int32 SweepSteps = 40;
+	for (int32 Step = 1; Step <= SweepSteps; ++Step)
+	{
+		const double Angle = StartAngle + (2.0 * PI * 0.92) * (static_cast<double>(Step) / SweepSteps);
+		Cable->EndEndpoint.WorldTarget = FVector(Radius * FMath::Cos(Angle), Radius * FMath::Sin(Angle), 10.0);
+		// Once the rope has wound past the first corner, tighten the budget so the
+		// wound path is over-extended.
+		if (Step == SweepSteps / 3)
+		{
+			Cable->SetRestLength(190.0);
+		}
+		Cable->StepSimulation(1);
+		const FCableSimTautDiagnostics D = Cable->GetTautDiagnostics();
+		const TArray<FVector> Poly = Cable->GetTautPolyline();
+		const double StraightDist = Poly.Num() >= 2 ? FVector::Distance(Poly[0], Poly.Last()) : 0.0;
+		MaxContacts = FMath::Max(MaxContacts, D.ContactCount);
+		if (PreviousContacts >= 2 && D.ContactCount <= PreviousContacts - 2 && D.SupportedEdgeCount > 0)
+		{
+			++AbruptDrop;
+		}
+		AddInfo(FString::Printf(
+			TEXT("step %2d: status=%d contacts=%d edges=%d pathLen=%.1f straight=%.1f points=%d"),
+			Step, static_cast<int32>(D.Status), D.ContactCount, D.SupportedEdgeCount,
+			D.PathLength, StraightDist, Poly.Num()));
+		PreviousContacts = D.ContactCount;
+	}
+	AddInfo(FString::Printf(TEXT("max contacts reached during wind: %d  abruptDrops=%d"),
+		MaxContacts, AbruptDrop));
+	TestTrue(TEXT("The rope wound around the box (multi-contact) at some point"), MaxContacts >= 2);
+	TestEqual(TEXT("The wrap never collapses across the box in a single step"), AbruptDrop, 0);
+	AddInfo(FString::Printf(TEXT("abrupt wrap drops (contacts>=1 -> 0 with edge present): %d"), AbruptDrop));
+
+	Cable->DestroyComponent();
+	CableOwner->Destroy();
+	CubeActor->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautEnabledClampsReachTest,
 	"CableSim.Runtime.Taut.EnabledClampsReach",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

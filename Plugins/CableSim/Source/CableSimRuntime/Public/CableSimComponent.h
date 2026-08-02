@@ -245,13 +245,14 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 UENUM(BlueprintType, meta = (Bitflags))
 enum class ECableSimDebugDraw : uint8
 {
-	Particles = 0 UMETA(DisplayName = "Particles"),
-	SnapshotBounds = 1 UMETA(DisplayName = "Snapshot bounds"),
-	CandidateTopology = 2 UMETA(DisplayName = "Candidate topology"),
-	ActiveContacts = 3 UMETA(DisplayName = "Active contacts"),
-	Friction = 4 UMETA(DisplayName = "Friction / load"),
-	TautPathAndGuide = 5 UMETA(DisplayName = "Taut path / guide"),
-	Status = 6 UMETA(DisplayName = "Status")
+	Cable = 0 UMETA(DisplayName = "Cable (tension)"),
+	Contacts = 1 UMETA(DisplayName = "Contacts / friction"),
+	Load = 2 UMETA(DisplayName = "Normal load"),
+	TautPath = 3 UMETA(DisplayName = "Taut path / reach"),
+	GuideCorridor = 4 UMETA(DisplayName = "Guide corridor"),
+	Snapshot = 5 UMETA(DisplayName = "Snapshot bounds"),
+	Topology = 6 UMETA(DisplayName = "Collision topology"),
+	Status = 7 UMETA(DisplayName = "Status HUD")
 };
 
 USTRUCT(BlueprintType)
@@ -278,9 +279,9 @@ struct CABLESIMRUNTIME_API FCableSimDebugSettings
 	bool bDraw = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (Bitmask, BitmaskEnum = "/Script/CableSimRuntime.ECableSimDebugDraw"))
-	int32 DrawFlags = (1 << static_cast<uint8>(ECableSimDebugDraw::Particles))
-		| (1 << static_cast<uint8>(ECableSimDebugDraw::ActiveContacts))
-		| (1 << static_cast<uint8>(ECableSimDebugDraw::TautPathAndGuide))
+	int32 DrawFlags = (1 << static_cast<uint8>(ECableSimDebugDraw::Cable))
+		| (1 << static_cast<uint8>(ECableSimDebugDraw::Contacts))
+		| (1 << static_cast<uint8>(ECableSimDebugDraw::TautPath))
 		| (1 << static_cast<uint8>(ECableSimDebugDraw::Status));
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0"))

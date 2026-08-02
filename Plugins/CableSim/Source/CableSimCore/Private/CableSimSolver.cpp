@@ -170,11 +170,10 @@ namespace CableSim
 		const double EndpointDistance = FVector3d::Distance(
 			Input.StartEndpoint.TargetPosition,
 			Input.EndEndpoint.TargetPosition);
-		// Inextensible rope: segments always target the rest segment length, so
-		// pulling both kinematic endpoints past the rest length shows up as genuine
-		// strain (a straight, over-stretched line) instead of the rope silently
-		// growing to fit. Reported via StrainRatio / Overextended below; stopping a
-		// driven endpoint at max reach is the taut layer's responsibility.
+		// Inextensible: segments always target the rest segment length, so pulling
+		// both kinematic endpoints apart past it shows as strain (StrainRatio /
+		// Overextended below), not growth. Reach clamping of a driven endpoint is
+		// handled by the taut layer.
 
 		const double DampingMultiplier = FMath::Clamp(1.0 - Config.VelocityDamping, 0.0, 1.0);
 		for (FParticle& Particle : Particles)
@@ -213,9 +212,8 @@ namespace CableSim
 			Guide.StepStrength = FMath::Clamp(Guide.StepStrength, 0.0, 1.0);
 		}
 
-		// One coarse-to-fine cascade before the fine sweep below, so a near-taut
-		// long cable doesn't need hundreds of flat Gauss-Seidel iterations to
-		// feel a distant endpoint move -- see the talk's own multigrid section.
+		// Coarse-to-fine cascade before the fine sweep, so a near-taut cable
+		// propagates a distant endpoint move without hundreds of flat iterations.
 		SolveMultigrid(Contacts, Guides);
 
 		ProjectedContacts.Init(false, Contacts.Num());
@@ -515,19 +513,14 @@ namespace CableSim
 		const FVector3d Direction = Distance > 1.e-12
 			? Difference / Distance
 			: ((FirstIndex & 1) == 0 ? FVector3d::UnitX() : -FVector3d::UnitX());
-		// Macklin-style over-relaxation used by the talk: shorten the target by
-		// omega instead of multiplying the entire correction by omega. Scaling
-		// the rest length by the index span lets this same function serve a
-		// multigrid coarse pair (e.g. every 8th particle) with no separate
-		// formula -- for an adjacent pair (span 1) it's identical to before.
+		// Over-relaxation: shorten the target distance by omega rather than scaling
+		// the correction. Scaling the rest length by the index span lets the same
+		// routine serve a multigrid coarse pair; span 1 is the plain adjacent case.
 		const double SpanRestLength = static_cast<double>(SecondIndex - FirstIndex) * RestSegmentLength;
 		const double Error = Distance - SpanRestLength / Config.DistanceOverRelaxation;
-		// A coarse multigrid pass must never push a span apart: a curled or
-		// sagging path reads as "compressed" in straight-line distance even
-		// though no individual segment is overstretched, and flattening that
-		// out at the coarse level would erase real curvature the fine sweep
-		// never asked to remove (the same class of mistake the talk warns
-		// about for pulling a resting rope through collision).
+		// A coarse pass must never push a span apart: a curled or sagging path reads
+		// as compressed in straight-line distance without any segment being
+		// overstretched, and flattening it at the coarse level erases real curvature.
 		if (bPullOnly && Error <= 0.0)
 		{
 			return;
@@ -545,11 +538,9 @@ namespace CableSim
 		{
 			return;
 		}
-		// Talk: nodes at the collision edge must stay part of every coarse
-		// level, or multigrid will pull the rope into collision. Extended here
-		// to guide-constrained nodes too, for the same reason: a coarse span
-		// skipping over a pinned/leashed node would drag it along with the
-		// span's endpoints instead of respecting its own constraint.
+		// A node holding a contact or guide constraint stays in every coarse level; a
+		// coarse span that skipped it would drag it along instead of respecting its
+		// own constraint, pulling the rope into collision.
 		TSet<int32> RequiredIndices;
 		RequiredIndices.Add(0);
 		RequiredIndices.Add(Particles.Num() - 1);
@@ -778,10 +769,9 @@ namespace CableSim
 			AddOrthonormalNormal(ContactEffectiveNormals[ContactIndex], Normals);
 			if (Contact.bHasFrictionAnchor)
 			{
-				// Carry the static-friction anchor by the surface's motion this step so
-				// the node sticks to the surface's material point, not to world space --
-				// this is what drags a resting cable along a moving platform. Zero for
-				// static surfaces, so their behaviour is unchanged.
+				// Carry the anchor by the surface's motion this step so the node sticks to
+				// the surface's material point rather than to world space. Zero for static
+				// surfaces.
 				AverageAnchor += Contact.FrictionAnchorPosition + Contact.SurfaceVelocity * DeltaTime;
 				++AnchorCount;
 			}
@@ -1007,6 +997,7 @@ namespace CableSim
 				? ParticleDynamicFrictionVelocityChanges[Contact.ParticleIndex] : 0.0;
 			Diagnostic.EstimatedTension = Particles[Contact.ParticleIndex].EstimatedTension;
 			Diagnostic.EstimatedNormalLoad = Particles[Contact.ParticleIndex].EstimatedNormalLoad;
+			Diagnostic.SurfaceVelocity = Contact.SurfaceVelocity;
 			const bool bActive = ActiveContacts.IsValidIndex(ContactIndex) && ActiveContacts[ContactIndex];
 			Diagnostic.bStaticAnchorHeld = bActive && Contact.bHasFrictionAnchor;
 		}

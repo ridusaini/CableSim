@@ -199,19 +199,16 @@ namespace CableSim
 			return LastResult;
 		};
 
-		// Talk's degradation philosophy: running out of iteration budget should not
-		// freeze the whole path. If the path we have is already collision-free, emit
-		// it as a best effort -- the other contacts hold the rope up and subsequent
-		// steps keep straightening it. Only a path that actually clips geometry falls
-		// back to the last good state (the FallbackStatus), which self-heals next step.
+		// On budget exhaustion, emit the current path if it is already collision-free
+		// rather than freezing; only a path that actually clips falls back to the last
+		// good state (FallbackStatus).
 		auto EmitBestEffort = [this, &Input, &Scene, &MovementIterations, &CollisionPhases, &TopologyEvents, &Fail](
 			const ETautStatus FallbackStatus)
 		{
-			// Only ship a best-effort path whose endpoints actually reached their
-			// requested targets and that is collision-free. If an endpoint is still
-			// mid-advance around an obstacle (budget ran out before it arrived), the
-			// path is genuinely incomplete -- hold the last good state and let the
-			// next step continue, exactly as before.
+			// Only ship a best-effort path whose endpoints reached their targets and
+			// that is collision-free. If an endpoint is still mid-advance around an
+			// obstacle (budget ran out before it arrived), the path is incomplete --
+			// hold the last good state instead.
 			const bool bEndpointsAtTargets =
 				Points[0].Position.Equals(Input.StartTarget, Config.TopologyTolerance)
 				&& Points.Last().Position.Equals(Input.EndTarget, Config.TopologyTolerance);
@@ -251,12 +248,10 @@ namespace CableSim
 			Targets[0] = Input.StartTarget;
 			Targets.Last() = Input.EndTarget;
 
-			// 2D unroll acceleration (the talk's movement-phase trick): a run of
-			// consecutive edge contacts on PARALLEL edges is solved in closed form by
-			// unrolling the edges into a plane and drawing one straight line, instead of
-			// Gauss-Seidel crawling as the edges converge. A correct unroll is already a
-			// fixed point of the iteration below, so this only seeds a better start;
-			// skew / non-parallel runs simply fall through to that iteration.
+			// A run of consecutive edge contacts on parallel edges has a closed-form
+			// taut solution: unroll the edges into a plane and draw one straight line.
+			// The flat iteration converges to it only slowly as the edges converge, so
+			// seed it directly here; skew runs fall through to the iteration.
 			for (int32 RunStart = 1; RunStart + 1 < Points.Num(); )
 			{
 				if (Points[RunStart].Type != ETautPointType::EdgeContact)
@@ -332,7 +327,6 @@ namespace CableSim
 				RunStart = RunEnd + 1;
 			}
 
-			bool bMovementConverged = Points.Num() == 2;
 			for (int32 LocalIteration = 0;
 				LocalIteration < Config.MaximumMovementIterations;
 				++LocalIteration)
@@ -379,16 +373,12 @@ namespace CableSim
 				}
 				if (MaximumDisplacement <= Config.MovementConvergenceTolerance)
 				{
-					bMovementConverged = true;
 					break;
 				}
 			}
-			// Accept a partially-straightened movement phase rather than freezing:
-			// the collision sweep and final ValidateState below still gate the path,
-			// and later steps keep straightening it (talk: "as straight as it can go,
-			// given the collision edges"). bMovementConverged stays the early break
-			// flag only.
-			(void)bMovementConverged;
+			// A partial movement phase is accepted, not failed: the collision sweep and
+			// final ValidateState below still gate the path, and later steps continue
+			// straightening it.
 
 			bool bCollisionAdded = false;
 			for (int32 PointIndex = 0; PointIndex < Points.Num(); ++PointIndex)
@@ -495,10 +485,21 @@ namespace CableSim
 					{
 						Point.Position = ContactPosition;
 						Point.EdgeParameter = Parameter;
+						// A wrap is removed only when straightening it through is a
+						// continuous lift-off: the chord no longer wraps this edge, is
+						// clear of geometry, and sweeping the rope from its current bend
+						// (Previous -> contact -> Next) onto the straight chord does not
+						// cross any other collision edge. A rope wound the long way round
+						// an obstacle fails that sweep, so it can never teleport across to
+						// a shorter chord -- it can only leave by sliding off an edge end
+						// (the vertex transition below).
 						if (!RequiresWrap(Previous, Next, *Edge, Config.TopologyTolerance)
 							&& SegmentIsCollisionFree(
 								Previous, Next, Scene, Config.TopologyTolerance,
-								Config.ParametricTolerance))
+								Config.ParametricTolerance)
+							&& !StraighteningCrossesEdge(
+								Previous, ContactPosition, Next, Point.FeatureId, Scene,
+								Config.TopologyTolerance, Config.ParametricTolerance))
 						{
 							Points.RemoveAt(PointIndex);
 							bTopologyChanged = true;
@@ -560,12 +561,10 @@ namespace CableSim
 					continue;
 				}
 
-				// Resolve the vertex to the shortest collision-free local path. Staying on
-				// the vertex (a caught rope -- the talk's stable inner corner) is the
-				// baseline; sliding onto a single incident edge (move-along) wins only if it
-				// is genuinely shorter and stays collision-free. Side edges never enter the
-				// shortest path, so they drop out for free -- the talk's inner/side outcomes
-				// from one shortest-path rule that is testable as an invariant.
+				// Resolve the vertex to the shortest collision-free local path: stay on
+				// the vertex, or slide onto whichever single incident edge is shorter and
+				// stays collision-free. An edge that would not shorten the path is never
+				// chosen.
 				constexpr int32 ResolveStay = 0;
 				constexpr int32 ResolveSingle = 1;
 				auto EdgeParameterOf = [](const FCollisionEdge& Edge, const FVector3d& Position, const double Tolerance)
@@ -1072,6 +1071,36 @@ namespace CableSim
 		OutParameter = FMath::Clamp(Axis / EdgeLength, 0.0, 1.0);
 		OutPosition = FMath::Lerp(Edge.Start, Edge.End, OutParameter);
 		return true;
+	}
+
+	bool FTautPathSolver::StraighteningCrossesEdge(
+		const FVector3d& Previous,
+		const FVector3d& Contact,
+		const FVector3d& Next,
+		const FCollisionFeatureId& OwnEdge,
+		const FTautCollisionScene& Scene,
+		const double DistanceTolerance,
+		const double ParametricTolerance)
+	{
+		// Would collapsing the bend Previous -> Contact -> Next onto the straight chord
+		// Previous -> Next sweep the rope across another convex edge? Test each usable
+		// edge (except the one this contact rides) against the bend triangle.
+		for (const FCollisionEdge& Edge : Scene.Edges)
+		{
+			if (Edge.Id == OwnEdge || !IsUsableEdge(Edge, DistanceTolerance))
+			{
+				continue;
+			}
+			double SegmentParameter = 0.0;
+			FVector3d Barycentric;
+			if (SegmentIntersectsTriangle(
+				Edge.Start, Edge.End, Previous, Contact, Next,
+				ParametricTolerance, SegmentParameter, Barycentric))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	double FTautPathSolver::CalculatePathLength(const TConstArrayView<FTautPoint> InPoints)

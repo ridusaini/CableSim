@@ -186,6 +186,7 @@ struct FCableSimRuntimeState
 	bool bTautWasActive = false;
 	FVector3d LastAcceptedTautEndpoints[2] = {FVector3d::ZeroVector, FVector3d::ZeroVector};
 	bool bHasLastAcceptedTautEndpoint[2] = {false, false};
+	TArray<CableSim::FGuideConstraint> LastGuides;
 };
 
 UCableSimComponent::UCableSimComponent()
@@ -764,6 +765,7 @@ void UCableSimComponent::PerformFixedStep(const double InterpolationAlpha)
 	CableSim::FStepInput Input = BuildStepInput(InterpolationAlpha);
 	GatherCollisionSnapshot(Input, IgnoredActors);
 	PerformTautStep(Input);
+	RuntimeState->LastGuides = Input.GuideConstraints;
 
 	const CableSim::FManifoldConfig ManifoldConfig = BuildManifoldConfig();
 	const bool bCollide = CollisionSettings.bEnableWorldCollision && RuntimeState->bSnapshotValid;
@@ -1091,12 +1093,10 @@ void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) 
 		return;
 	}
 	const double Slack = FMath::Max(SimulationSettings.RestLength - PathLength, 0.0);
-	// Parabolic-catenary sag envelope, not a linear function of slack: a rope
-	// with PathLength span and Slack excess length sags by ~sqrt(3*span*slack/8)
-	// at its deepest point under the standard small-sag catenary approximation.
-	// Using this instead of a flat Slack*scale means the corridor already
-	// matches the shape a real near-taut rope settles into, so the guide isn't
-	// fighting the rope's own natural rest shape as slack shrinks.
+	// Parabolic-catenary sag envelope (not linear in slack): a rope of span PathLength
+	// with Slack excess length sags ~sqrt(3*span*slack/8) at its deepest point. Sizing
+	// the corridor to that shape keeps the guide from fighting the rope's natural rest
+	// shape as slack shrinks.
 	const double BaseRadius = FMath::Min(
 		FMath::Max(TautSettings.GuideSagScale, 0.0) * FMath::Sqrt(3.0 * PathLength * Slack / 8.0),
 		FMath::Max(TautSettings.MaximumGuideRadius, 0.0));
@@ -1275,111 +1275,174 @@ FDebugRenderSceneProxy* UCableSimComponent::CreateDebugSceneProxy()
 	{
 		return (DebugSettings.DrawFlags & (1 << static_cast<uint8>(Flag))) != 0;
 	};
-	if (HasFlag(ECableSimDebugDraw::Particles))
+
+	const CableSim::FStepResult& Result = Solver.GetLastStepResult();
+	const float Thickness = DebugSettings.LineThickness;
+	const FColor CableTeal(61, 214, 196);
+	const FColor WarnRed(225, 45, 57);
+	const FColor EndpointAmber(255, 176, 32);
+	const FColor SurfaceOrange(255, 122, 69);
+	const FColor FrictionHeld(76, 195, 138);
+	const FColor FrictionSlip(245, 166, 35);
+	const FColor TautViolet(179, 127, 235);
+	const FColor CorridorBlue(91, 141, 239);
+	const FColor NormalWhite(232, 236, 239);
+	const FColor EdgeContactYellow(247, 201, 72);
+	auto Ramp = [](double Ratio) -> FColor
 	{
+		const float T = static_cast<float>(FMath::Clamp(Ratio, 0.0, 1.0));
+		const FLinearColor Low(0.24f, 0.84f, 0.77f);
+		const FLinearColor Mid(0.96f, 0.65f, 0.14f);
+		const FLinearColor High(0.88f, 0.18f, 0.22f);
+		return (T < 0.5f ? FMath::Lerp(Low, Mid, T * 2.0f)
+			: FMath::Lerp(Mid, High, (T - 0.5f) * 2.0f)).ToFColor(true);
+	};
+	const bool bOverextended = Result.StrainRatio > 1.e-4;
+	const bool bTautActive = TautSettings.Mode != ECableSimTautMode::Disabled;
+
+	// Cable, coloured by per-node tension (red when overextended); endpoints marked.
+	if (HasFlag(ECableSimDebugDraw::Cable))
+	{
+		const double MaxTension = FMath::Max(Result.MaximumEstimatedTension, 1.e-6);
+		for (int32 Index = 0; Index + 1 < RenderPositions.Num(); ++Index)
+		{
+			const FColor SegColor = bOverextended
+				? WarnRed : Ramp(Particles[Index].EstimatedTension / MaxTension);
+			Proxy->Lines.Emplace(RenderPositions[Index], RenderPositions[Index + 1], SegColor, Thickness + 1.0f);
+		}
 		for (int32 Index = 0; Index < RenderPositions.Num(); ++Index)
 		{
-			const FLinearColor Color = Particles[Index].Mode == CableSim::EParticleMode::Kinematic
-				? FLinearColor(FColor::Orange)
-				: FLinearColor::White;
-			Proxy->Spheres.Emplace(
-				3.0f,
-				RenderPositions[Index],
-				Color,
-				FDebugRenderSceneProxy::EDrawType::SolidAndWireMeshes);
+			const bool bEndpoint = Index == 0 || Index == RenderPositions.Num() - 1;
+			const FColor NodeColor = Particles[Index].Mode == CableSim::EParticleMode::Kinematic
+				? EndpointAmber : CableTeal;
+			Proxy->Spheres.Emplace(bEndpoint ? 5.0f : 2.5f, RenderPositions[Index],
+				FLinearColor(NodeColor), FDebugRenderSceneProxy::EDrawType::SolidAndWireMeshes);
 		}
 	}
-	if (HasFlag(ECableSimDebugDraw::ActiveContacts) || HasFlag(ECableSimDebugDraw::Friction))
+
+	// Contacts (normal + static/slipping state + surface velocity) and normal load.
+	if (HasFlag(ECableSimDebugDraw::Contacts) || HasFlag(ECableSimDebugDraw::Load))
 	{
-		const double MaximumLoad = FMath::Max(Solver.GetLastStepResult().MaximumEstimatedNormalLoad, 1.e-6);
-		for (const CableSim::FContactDiagnostic& Diagnostic : Solver.GetLastContactDiagnostics())
+		const double MaxLoad = FMath::Max(Result.MaximumEstimatedNormalLoad, 1.e-6);
+		for (const CableSim::FContactDiagnostic& Contact : Solver.GetLastContactDiagnostics())
 		{
-			if (!Diagnostic.bProjected || !Particles.IsValidIndex(Diagnostic.ParticleIndex))
+			if (!Contact.bProjected || !Particles.IsValidIndex(Contact.ParticleIndex))
 			{
 				continue;
 			}
-			const FVector Position(Particles[Diagnostic.ParticleIndex].Position);
-			if (HasFlag(ECableSimDebugDraw::ActiveContacts))
+			const FVector Position(Particles[Contact.ParticleIndex].Position);
+			if (HasFlag(ECableSimDebugDraw::Contacts))
 			{
-				Proxy->ArrowLines.Emplace(Position, Position + FVector(Diagnostic.Normal) * 18.0, FColor::Yellow, 5.0f);
+				Proxy->ArrowLines.Emplace(Position, Position + FVector(Contact.Normal) * 16.0,
+					NormalWhite, Thickness + 1.0f);
+				Proxy->Spheres.Emplace(3.0f, Position,
+					FLinearColor(Contact.bStaticAnchorHeld ? FrictionHeld : FrictionSlip),
+					FDebugRenderSceneProxy::EDrawType::WireMesh);
+				if (Contact.SurfaceVelocity.SizeSquared() > 1.e-6)
+				{
+					Proxy->ArrowLines.Emplace(Position, Position + FVector(Contact.SurfaceVelocity) * 0.1,
+						SurfaceOrange, Thickness + 1.5f);
+				}
 			}
-			if (HasFlag(ECableSimDebugDraw::Friction))
+			if (HasFlag(ECableSimDebugDraw::Load))
 			{
-				const float LoadRatio = static_cast<float>(FMath::Clamp(Diagnostic.EstimatedNormalLoad / MaximumLoad, 0.0, 1.0));
-				const FColor HeatColor = FColor::MakeRedToGreenColorFromScalar(1.0f - LoadRatio);
-				Proxy->Spheres.Emplace(3.0f + 4.0f * LoadRatio, Position, FLinearColor(HeatColor), FDebugRenderSceneProxy::EDrawType::WireMesh);
+				const float LoadRatio = static_cast<float>(FMath::Clamp(Contact.EstimatedNormalLoad / MaxLoad, 0.0, 1.0));
+				Proxy->Spheres.Emplace(3.0f + 5.0f * LoadRatio, Position,
+					FLinearColor(Ramp(LoadRatio)), FDebugRenderSceneProxy::EDrawType::WireMesh);
 			}
 		}
 	}
 
-	if (TautSettings.Mode == ECableSimTautMode::Disabled)
+	// Guide corridor: the leash volume each dynamic node is held within.
+	if (bTautActive && HasFlag(ECableSimDebugDraw::GuideCorridor))
 	{
-		return Proxy;
+		for (const CableSim::FGuideConstraint& Guide : RuntimeState->LastGuides)
+		{
+			if (Particles.IsValidIndex(Guide.ParticleIndex) && Guide.MaximumDistance > 0.0)
+			{
+				Proxy->Spheres.Emplace(static_cast<float>(Guide.MaximumDistance),
+					FVector(Guide.TargetPosition), FLinearColor(CorridorBlue),
+					FDebugRenderSceneProxy::EDrawType::WireMesh);
+			}
+		}
 	}
-	if (HasFlag(ECableSimDebugDraw::SnapshotBounds) && RuntimeState->ChaosSnapshot.QueryBounds.IsValid)
+
+	if (bTautActive && HasFlag(ECableSimDebugDraw::Snapshot) && RuntimeState->ChaosSnapshot.QueryBounds.IsValid)
 	{
-		Proxy->Boxes.Emplace(
-			RuntimeState->ChaosSnapshot.QueryBounds,
-			FColor(180, 60, 255),
-			FDebugRenderSceneProxy::EDrawType::WireMesh,
-			DebugSettings.LineThickness);
+		Proxy->Boxes.Emplace(RuntimeState->ChaosSnapshot.QueryBounds, FColor(142, 124, 195),
+			FDebugRenderSceneProxy::EDrawType::WireMesh, Thickness);
 	}
-	if (HasFlag(ECableSimDebugDraw::CandidateTopology))
+
+	// Gathered collision edges, coloured by kind; moving surfaces tinted orange.
+	if (bTautActive && HasFlag(ECableSimDebugDraw::Topology))
 	{
 		for (const CableSim::FCollisionEdge& Edge : RuntimeState->ChaosSnapshot.Edges)
 		{
-			Proxy->Lines.Emplace(FVector(Edge.Start), FVector(Edge.End), GetEdgeDebugColor(Edge.Kind), DebugSettings.LineThickness);
+			const FColor EdgeColor = Edge.SurfaceVelocity.SizeSquared() > 1.e-6
+				? SurfaceOrange : GetEdgeDebugColor(Edge.Kind);
+			Proxy->Lines.Emplace(FVector(Edge.Start), FVector(Edge.End), EdgeColor, Thickness);
 		}
 	}
+
 	const TArray<CableSim::FTautPoint>& TautPoints = RuntimeState->TautSolver.GetPoints();
-	if (HasFlag(ECableSimDebugDraw::TautPathAndGuide))
+	if (bTautActive && HasFlag(ECableSimDebugDraw::TautPath))
 	{
-		const bool bHasContact = TautPoints.ContainsByPredicate([](const CableSim::FTautPoint& Point)
-		{
-			return Point.Type != CableSim::ETautPointType::Endpoint;
-		});
 		const bool bPathValid = RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::Ready
 			|| RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::NoRelevantGeometry;
-		const FColor PathColor = !bPathValid
-			? FColor(255, 96, 32)
-			: (bHasContact ? FColor(255, 0, 255) : FColor(80, 200, 120));
+		const FColor PathColor = bPathValid ? TautViolet : WarnRed;
 		for (int32 Index = 0; Index + 1 < TautPoints.Num(); ++Index)
 		{
-			Proxy->Lines.Emplace(
-				FVector(TautPoints[Index].Position),
-				FVector(TautPoints[Index + 1].Position),
-				PathColor,
-				DebugSettings.LineThickness + 1.0f);
+			Proxy->Lines.Emplace(FVector(TautPoints[Index].Position),
+				FVector(TautPoints[Index + 1].Position), PathColor, Thickness + 2.0f);
 		}
 		for (const CableSim::FTautPoint& Point : TautPoints)
 		{
 			if (Point.Type != CableSim::ETautPointType::Endpoint)
 			{
-				const FLinearColor ContactColor = Point.Type == CableSim::ETautPointType::VertexContact
-					? FLinearColor::Red : FLinearColor::Yellow;
-				Proxy->Spheres.Emplace(
-					4.0f, FVector(Point.Position), ContactColor,
+				Proxy->Spheres.Emplace(4.0f, FVector(Point.Position),
+					FLinearColor(Point.Type == CableSim::ETautPointType::VertexContact
+						? WarnRed : EdgeContactYellow),
 					FDebugRenderSceneProxy::EDrawType::WireMesh);
 			}
 		}
 	}
+
+	// Colour-coded HUD stacked above the start endpoint.
 	if (HasFlag(ECableSimDebugDraw::Status))
 	{
-		const FString StatusName = StaticEnum<ECableSimTautStatus>()->GetNameStringByValue(static_cast<int64>(RuntimeState->TautDiagnostics.Status));
-		Proxy->Texts.Emplace(
-			FString::Printf(
-				TEXT("Taut: %s | tris %d | verts %d | edges %d/%d | contacts %d | %.2f ms"),
-				*StatusName,
-				RuntimeState->TautDiagnostics.TriangleCount,
-				RuntimeState->TautDiagnostics.ExtractedVertexCount,
-				RuntimeState->TautDiagnostics.SupportedEdgeCount,
-				RuntimeState->TautDiagnostics.ExtractedEdgeCount,
-				RuntimeState->TautDiagnostics.ContactCount,
-				RuntimeState->TautDiagnostics.SnapshotMilliseconds
-					+ RuntimeState->TautDiagnostics.TopologyCompileMilliseconds
-					+ RuntimeState->TautDiagnostics.SolverMilliseconds),
-			FVector(Particles[0].Position) + FVector(0.0, 0.0, 20.0),
-			FLinearColor::White);
+		const FCableSimStatus Status = GetSimulationStatus();
+		const FVector Base(Particles[0].Position);
+		const FColor Ok(76, 195, 138);
+		const FColor Warn(245, 166, 35);
+		const FColor Bad(225, 45, 57);
+		auto Line = [&Proxy, &Base](const int32 Row, const FString& Text, const FColor& Color)
+		{
+			Proxy->Texts.Emplace(Text, Base + FVector(0.0, 0.0, 28.0 - Row * 7.0), FLinearColor(Color));
+		};
+		const FColor SimColor = Status.Status == ECableSimSimulationStatus::Ready ? Ok
+			: (Status.Status == ECableSimSimulationStatus::Overextended ? Warn : Bad);
+		Line(0, FString::Printf(TEXT("Sim %s  step %lld  nodes %d  iters %d"),
+			*StaticEnum<ECableSimSimulationStatus>()->GetNameStringByValue(static_cast<int64>(Status.Status)),
+			Status.StepIndex, Status.ParticleCount, Result.ConstraintIterations), SimColor);
+		Line(1, FString::Printf(TEXT("seg %.2f  pen %.2f  spd %.0f"),
+			Status.MaximumSegmentError, Status.MaximumPenetration, Status.MaximumParticleSpeed),
+			Status.MaximumPenetration > 1.0 ? Bad : (Status.MaximumSegmentError > 1.0 ? Warn : NormalWhite));
+		Line(2, FString::Printf(TEXT("tension %.1f  load %.1f"),
+			Status.MaximumEstimatedTension, Status.MaximumEstimatedNormalLoad), NormalWhite);
+		if (bTautActive)
+		{
+			Line(3, FString::Printf(TEXT("reach: strain %.0f%%  path %.0f / %.0f"),
+				Status.StrainRatio * 100.0, RuntimeState->TautDiagnostics.PathLength, Status.RestLength),
+				bOverextended ? Bad : Ok);
+			const double TautMilliseconds = RuntimeState->TautDiagnostics.SnapshotMilliseconds
+				+ RuntimeState->TautDiagnostics.TopologyCompileMilliseconds
+				+ RuntimeState->TautDiagnostics.SolverMilliseconds;
+			Line(4, FString::Printf(TEXT("taut %s  contacts %d  %.2f ms"),
+				*StaticEnum<ECableSimTautStatus>()->GetNameStringByValue(
+					static_cast<int64>(RuntimeState->TautDiagnostics.Status)),
+				RuntimeState->TautDiagnostics.ContactCount, TautMilliseconds),
+				RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::Ready ? Ok : Warn);
+		}
 	}
 	return Proxy;
 #endif

@@ -596,10 +596,9 @@ bool FCableSimChaosCollisionAdapter::GatherSnapshot(
 				}
 				return OutSnapshot.Diagnostics.ShapeCount >= MaximumShapes;
 			});
-		// Stamp the surface's world velocity onto the triangles this object just added
-		// so friction can carry a resting cable along with a moving platform. Static
-		// objects keep zero. GetVAtPoint includes rotation; a per-triangle centroid is
-		// exact for translation and a close approximation for rotation across one face.
+		// Stamp the surface's world velocity onto this object's triangles for friction;
+		// static objects keep zero. GetVAtPoint includes rotation; the per-triangle
+		// centroid is exact for translation and approximate for rotation across a face.
 		if (!bStaticObject)
 		{
 			for (int32 TriangleIndex = ObjectTriangleStart;

@@ -52,7 +52,7 @@ namespace CableSim
 		ECollisionGeometryType GeometryType = ECollisionGeometryType::Unknown;
 		bool bStaticObject = false;
 		// World velocity of the owning surface at this triangle (zero for static
-		// objects). Lets friction carry a resting cable along a moving platform.
+		// objects); consumed by friction so contacts move with a moving surface.
 		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		FVector3d Vertices[3] = {
 			FVector3d::ZeroVector,

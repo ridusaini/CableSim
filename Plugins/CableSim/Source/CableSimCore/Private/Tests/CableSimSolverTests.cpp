@@ -1422,14 +1422,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCableSimLongRopeMultigridConvergesTest::RunTest(const FString& Parameters)
 {
-	// Talk: "if you have a rope that's almost taut, it basically feels like it
-	// would never converge" without multigrid. Reproduces that directly: a
-	// 100-segment near-taut cable gets one big lateral endpoint swing (a large,
-	// sudden perturbation the fine sweep alone has to propagate node-by-node
-	// across the whole rope), then a SINGLE step runs with a deliberately small
-	// fine-sweep iteration budget. Multigrid should already carry most of the
-	// correction coarse-to-fine in that one step; flat Gauss-Seidel alone
-	// should still show substantial unconverged segment error.
+	// A 100-segment near-taut cable gets one large lateral endpoint swing, then a
+	// single step with a small fine-sweep budget. Multigrid carries most of the
+	// correction coarse-to-fine in that one step; the flat sweep alone leaves
+	// substantial unconverged segment error.
 	auto MeasureConvergence = [](const int32 MultigridIterations, double& OutMaximumSegmentError) -> bool
 	{
 		const double RestLength = 1000.0;
@@ -1474,13 +1470,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCableSimMultigridDoesNotPullThroughContactTest::RunTest(const FString& Parameters)
 {
-	// Talk's explicit caveat: nodes at the collision edge must be part of every
-	// coarse level, or multigrid starts pulling the rope into collision. A
-	// near-taut cable rests across a raised plane at its midpoint (an active
-	// contact partway along a long, otherwise-slack cable); if the coarse pass
-	// skipped that contact node, its coarse span would treat the resting node
-	// as just another interpolation point and drag it straight through the
-	// plane toward the taut chord.
+	// A contact node must be part of every coarse level, or multigrid pulls the rope
+	// into collision. A near-taut cable rests across a raised plane at its midpoint;
+	// if the coarse pass skipped that contact node, its coarse span would treat it as
+	// a plain interpolation point and drag it straight through the plane.
 	const double RestLength = 500.0;
 	const double PlaneHeight = 30.0;
 	const CableSim::FContactGenerator PlaneGenerator =

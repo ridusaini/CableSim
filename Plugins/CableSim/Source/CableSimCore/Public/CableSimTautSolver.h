@@ -171,6 +171,14 @@ namespace CableSim
 			double Tolerance,
 			FVector3d& OutPosition,
 			double& OutParameter);
+		static bool StraighteningCrossesEdge(
+			const FVector3d& Previous,
+			const FVector3d& Contact,
+			const FVector3d& Next,
+			const FCollisionFeatureId& OwnEdge,
+			const FTautCollisionScene& Scene,
+			double DistanceTolerance,
+			double ParametricTolerance);
 		static double CalculatePathLength(TConstArrayView<FTautPoint> InPoints);
 		bool ValidateState(const FTautCollisionScene* Scene = nullptr) const;
 		void UpdateResult(

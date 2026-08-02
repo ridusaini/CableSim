@@ -262,7 +262,7 @@ namespace CableSim
 		for (const FCollisionEdge& Edge : OutEdges)
 		{
 			// Only wrapping topology belongs at a rope vertex. Face diagonals and
-			// concave/boundary edges inflated valence and could make an ordinary
+			// concave/boundary edges would inflate valence and make an ordinary
 			// triangulated cube look unsupported at a corner.
 			if (Edge.Kind != ECollisionEdgeKind::Convex
 				&& Edge.Kind != ECollisionEdgeKind::NonManifold)

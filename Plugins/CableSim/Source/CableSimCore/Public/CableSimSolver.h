@@ -56,14 +56,10 @@ namespace CableSim
 		double DynamicFrictionCoefficient = 0.25;
 		double StaticFrictionSpeedThreshold = 2.0;
 		double ContactActiveBand = 1.0;
-		// Talk: "if you have a rope that's almost taut, it basically feels like
-		// it would never converge" without multigrid. 0 disables it (flat
-		// Gauss-Seidel sweep only). The gate is deliberately low: a near-taut
-		// cable does NOT converge quickly at typical resolutions -- measured, a
-		// 63-node taut cable holds ~45cm of sag at 64 flat iterations and still
-		// 14cm at 512 -- so multigrid must run for ordinary cables, not only very
-		// long ones. SolveMultigrid self-no-ops below ~4 particles (no coarse
-		// stride exists), so the gate only excludes trivially short straps.
+		// Coarse-to-fine passes for near-taut convergence; a flat Gauss-Seidel sweep
+		// alone leaves large residual sag on near-taut cables at typical resolutions.
+		// 0 disables multigrid. The gate is low because ordinary-length cables need it;
+		// SolveMultigrid is a no-op below ~4 particles regardless.
 		int32 MultigridIterations = 4;
 		int32 MultigridMinimumParticles = 8;
 
@@ -108,6 +104,7 @@ namespace CableSim
 		uint64 FeatureId = 0;
 		int32 ParticleIndex = INDEX_NONE;
 		FVector3d Normal = FVector3d::UnitZ();
+		FVector3d SurfaceVelocity = FVector3d::ZeroVector;
 		double NormalCorrection = 0.0;
 		double StaticFrictionCorrection = 0.0;
 		double DynamicFrictionVelocityChange = 0.0;
