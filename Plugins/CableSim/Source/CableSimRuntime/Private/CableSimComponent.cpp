@@ -965,6 +965,22 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			? Particles[0].Position : Particles.Last().Position;
 		const FVector3d RequestedTarget = EndpointIndex == 0
 			? TautInput.StartTarget : TautInput.EndTarget;
+		// Probe along the requested direction over a bounded span, not all the way to a
+		// far overextended target. Capping the span at the rope length keeps the reach
+		// boundary resolved finely (span/2^iterations), so an overextended endpoint tracks
+		// the boundary continuously instead of landing coarsely and freezing. When the
+		// request is within reach this span equals the requested distance -- identical to
+		// a straight Lerp to the target.
+		const FVector3d ToRequested = RequestedTarget - CurrentTarget;
+		const double RequestedDistance = ToRequested.Length();
+		const FVector3d ReachDirection = RequestedDistance > UE_KINDA_SMALL_NUMBER
+			? ToRequested / RequestedDistance : FVector3d::ZeroVector;
+		const double ProbeSpan = FMath::Min(
+			RequestedDistance, FMath::Max(SimulationSettings.RestLength, 0.0));
+		auto CandidateAt = [&](const double Alpha)
+		{
+			return CurrentTarget + ReachDirection * (Alpha * ProbeSpan);
+		};
 		double AcceptedAlpha = 0.0;
 		CableSim::FTautStateSnapshot AcceptedState;
 		bool bHasAcceptedProbe = false;
@@ -973,7 +989,7 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 		{
 			RuntimeState->TautSolver.RestoreState(InitialState);
 			CableSim::FTautStepInput ProbeInput = TautInput;
-			const FVector3d CandidateTarget = FMath::Lerp(CurrentTarget, RequestedTarget, Alpha);
+			const FVector3d CandidateTarget = CandidateAt(Alpha);
 			if (EndpointIndex == 0)
 			{
 				ProbeInput.StartTarget = CandidateTarget;
@@ -1015,8 +1031,7 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			RuntimeState->TautSolver.RestoreState(AcceptedState);
 			CableSim::FEndpointStepInput& ConstrainedInput = EndpointIndex == 0
 				? Input.StartEndpoint : Input.EndEndpoint;
-			ConstrainedInput.TargetPosition = FMath::Lerp(
-				CurrentTarget, RequestedTarget, AcceptedAlpha);
+			ConstrainedInput.TargetPosition = CandidateAt(AcceptedAlpha);
 			ConstrainedInput.TargetVelocity *= AcceptedAlpha;
 			bAccepted = true;
 		}
@@ -1100,6 +1115,35 @@ void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) 
 	const double BaseRadius = FMath::Min(
 		FMath::Max(TautSettings.GuideSagScale, 0.0) * FMath::Sqrt(3.0 * PathLength * Slack / 8.0),
 		FMath::Max(TautSettings.MaximumGuideRadius, 0.0));
+	const double CollisionClearance = FMath::Max(CollisionSettings.Radius, 0.0)
+		+ FMath::Max(CollisionSettings.SkinWidth, 0.0)
+		+ FMath::Max(TautSettings.TopologyTolerance, 0.0);
+	// The clearance floor only matters where the taut line rides geometry: there a node
+	// must stay clear of the surface. In a free span the line hangs in open air, so the
+	// corridor collapses to MinimumGuideRadius and a taut span hugs the line instead of
+	// bowing by ~a cable radius. A contact is an interior taut point.
+	const double ContactWindow = 3.0 * CollisionClearance;
+	auto NearestContactDistance = [&Points](const FVector3d& Position) -> double
+	{
+		double Nearest = TNumericLimits<double>::Max();
+		for (int32 Index = 1; Index + 1 < Points.Num(); ++Index)
+		{
+			Nearest = FMath::Min(Nearest, FVector3d::Distance(Position, Points[Index].Position));
+		}
+		return Nearest;
+	};
+	const double MinimumRadius = FMath::Max(TautSettings.MinimumGuideRadius, 0.0);
+	// Previous frame's corridor width per node, so the corridor can close only gradually.
+	// Collapsing it in one frame yanks a cable that was resting inside the wide corridor
+	// onto the taut line (the snap); easing it in lets the cable follow smoothly, matching
+	// the talk's "as the rope gets closer to taut, the distance gets shorter".
+	TMap<int32, double> PreviousWidth;
+	PreviousWidth.Reserve(RuntimeState->LastGuides.Num());
+	for (const CableSim::FGuideConstraint& Previous : RuntimeState->LastGuides)
+	{
+		PreviousWidth.Add(Previous.ParticleIndex, Previous.MaximumDistance);
+	}
+	const double CloseFraction = FMath::Clamp(TautSettings.GuideCloseFraction, 0.0, 1.0);
 	for (int32 ParticleIndex = 1; ParticleIndex + 1 < Particles.Num(); ++ParticleIndex)
 	{
 		if (Particles[ParticleIndex].Mode != CableSim::EParticleMode::Dynamic)
@@ -1113,12 +1157,24 @@ void UCableSimComponent::BuildTautGuideConstraints(CableSim::FStepInput& Input) 
 		CableSim::FGuideConstraint& Guide = Input.GuideConstraints.AddDefaulted_GetRef();
 		Guide.ParticleIndex = ParticleIndex;
 		Guide.TargetPosition = SamplePolyline(Points, Alpha);
-		const double CollisionClearance = FMath::Max(CollisionSettings.Radius, 0.0)
-			+ FMath::Max(CollisionSettings.SkinWidth, 0.0)
-			+ FMath::Max(TautSettings.TopologyTolerance, 0.0);
-		Guide.MaximumDistance = FMath::Max(
-			BaseRadius * FMath::Sin(UE_PI * Alpha),
-			FMath::Max(FMath::Max(TautSettings.MinimumGuideRadius, 0.0), CollisionClearance));
+		const double Floor = NearestContactDistance(Guide.TargetPosition) <= ContactWindow
+			? FMath::Max(MinimumRadius, CollisionClearance)
+			: MinimumRadius;
+		const double TargetWidth = FMath::Max(BaseRadius * FMath::Sin(UE_PI * Alpha), Floor);
+		if (const double* Prev = PreviousWidth.Find(ParticleIndex))
+		{
+			// Ease toward the target width; the max() lets it widen freely but close only
+			// by CloseFraction per step.
+			Guide.MaximumDistance = FMath::Max(TargetWidth, FMath::Lerp(*Prev, TargetWidth, CloseFraction));
+		}
+		else
+		{
+			// First engagement: open the corridor to wherever the node already sits so it
+			// is not snapped, then let it close over the following steps.
+			const double NodeOffset = FVector3d::Distance(
+				Particles[ParticleIndex].Position, Guide.TargetPosition);
+			Guide.MaximumDistance = FMath::Max(TargetWidth, NodeOffset);
+		}
 		Guide.StepStrength = FMath::Clamp(TautSettings.GuideStepStrength, 0.0, 1.0) * ActivationAlpha;
 	}
 }

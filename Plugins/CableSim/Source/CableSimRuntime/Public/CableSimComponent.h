@@ -240,6 +240,11 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double GuideStepStrength = 0.85;
+
+	// How much of the way the guide corridor closes toward its target width each step
+	// (1 = instant, which snaps a resting cable onto the taut line; lower eases it in).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	double GuideCloseFraction = 0.15;
 };
 
 UENUM(BlueprintType, meta = (Bitflags))
