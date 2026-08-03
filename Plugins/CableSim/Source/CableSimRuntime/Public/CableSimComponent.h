@@ -59,13 +59,42 @@ enum class ECableSimTautStatus : uint8
 	InvalidSeed,
 	FeatureUnavailable,
 	PathBlocked,
+	UnsupportedTopology,
 	NonManifoldTopology,
 	TopologyOverValence,
+	TJunctionTopology,
+	OverlappingTopology,
 	CollisionBudgetExceeded,
 	TopologyBudgetExceeded,
 	SnapshotFailed,
 	InvalidConfiguration,
 	NumericalFailure
+};
+
+UENUM(BlueprintType)
+enum class ECableSimTautEndpointRole : uint8
+{
+	// This endpoint target is authoritative. Reach projection never moves it.
+	Fixed,
+	// This endpoint follows its requested target while feasible and participates
+	// in weighted reach projection when the rope is fully extended.
+	Driven,
+	// The taut solve follows the dynamic endpoint particle and never drives it.
+	Free
+};
+
+USTRUCT(BlueprintType)
+struct CABLESIMRUNTIME_API FCableSimTautEndpointPolicy
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
+	ECableSimTautEndpointRole Role = ECableSimTautEndpointRole::Driven;
+
+	// Higher weight preserves more of this endpoint's requested movement when
+	// both endpoints are driven and the full request is infeasible.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.001", EditCondition = "Role == ECableSimTautEndpointRole::Driven"))
+	double ReachWeight = 1.0;
 };
 
 USTRUCT(BlueprintType)
@@ -196,10 +225,11 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	ECableSimTautMode Mode = ECableSimTautMode::Disabled;
 
-	// In Enabled mode this endpoint is conservatively clamped to the furthest
-	// collision-free target that does not require more than RestLength.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimTautMode::Enabled"))
-	ECableSimEndpoint ConstrainedEndpoint = ECableSimEndpoint::End;
+	FCableSimTautEndpointPolicy StartEndpoint;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	FCableSimTautEndpointPolicy EndEndpoint;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.001", Units = "cm"))
 	double TopologyTolerance = 0.1;
@@ -335,6 +365,9 @@ struct CABLESIMRUNTIME_API FCableSimTautDiagnostics
 	int32 SupportedEdgeCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int64 TopologyRevision = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
 	int32 MovementIterationCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
@@ -342,6 +375,9 @@ struct CABLESIMRUNTIME_API FCableSimTautDiagnostics
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
 	int32 TopologyEventCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 PairDecisionCount = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
 	double PathLength = 0.0;

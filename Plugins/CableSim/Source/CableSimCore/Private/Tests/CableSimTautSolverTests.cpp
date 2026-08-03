@@ -128,6 +128,10 @@ namespace CableSimTautTests
 			if (First[Index].Type != Second[Index].Type
 				|| First[Index].FeatureId != Second[Index].FeatureId
 				|| !First[Index].Position.Equals(Second[Index].Position, 1.e-12)
+				|| First[Index].bHasPendingTarget != Second[Index].bHasPendingTarget
+				|| !First[Index].PendingTarget.Equals(Second[Index].PendingTarget, 1.e-12)
+				|| First[Index].HistoryFeatureId0 != Second[Index].HistoryFeatureId0
+				|| First[Index].HistoryFeatureId1 != Second[Index].HistoryFeatureId1
 				|| !FMath::IsNearlyEqual(
 					First[Index].EdgeParameter, Second[Index].EdgeParameter, 1.e-12))
 			{
@@ -218,6 +222,75 @@ bool FCableSimTopologyDeterminismTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Edge identifiers are stable"), FirstEdges[Index].Id == SecondEdges[Index].Id);
 		TestEqual(TEXT("Edge classification is stable"), FirstEdges[Index].Kind, SecondEdges[Index].Kind);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimStaticTautTopologyContractTest,
+	"CableSim.Core.Topology.StaticTautContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimStaticTautTopologyContractTest::RunTest(const FString& Parameters)
+{
+	TArray<CableSim::FCollisionTriangle> Forward = CableSimTautTests::MakeBoxTriangles();
+	TArray<CableSim::FCollisionTriangle> Reverse = Forward;
+	Algo::Reverse(Reverse);
+	CableSim::FTautStaticTopology First;
+	CableSim::FTautStaticTopology Second;
+	TestTrue(TEXT("A complete static convex box is admitted"), First.Build(Forward, 1.e-6, 8));
+	TestTrue(TEXT("Authored triangle order does not affect admission"), Second.Build(Reverse, 1.e-6, 8));
+	TestEqual(TEXT("The persistent topology revision is order-independent"),
+		First.GetRevision(), Second.GetRevision());
+	TestEqual(TEXT("The provider publishes all convex box edges"),
+		First.GetScene().Edges.Num(), 18);
+
+	TArray<CableSim::FCollisionTriangle> TJunction = Forward;
+	TArray<CableSim::FCollisionTriangle> SmallBox = CableSimTautTests::MakeBoxTriangles();
+	for (CableSim::FCollisionTriangle& Triangle : SmallBox)
+	{
+		Triangle.Id.ObjectToken = 2;
+		for (FVector3d& Position : Triangle.Vertices)
+		{
+			Position = 0.5 * Position + FVector3d(1.5, 1.5, 0.5);
+		}
+	}
+	TJunction.Append(SmallBox);
+	CableSim::FTautStaticTopology RejectedTJunction;
+	TestFalse(TEXT("A shape vertex terminating in another shape's edge is rejected"),
+		RejectedTJunction.Build(TJunction, 1.e-6, 8));
+	TestEqual(TEXT("The T-junction failure is explicit"),
+		RejectedTJunction.GetDiagnostics().Issue, CableSim::ETautTopologyIssue::TJunction);
+
+	TArray<CableSim::FCollisionTriangle> Overlap = Forward;
+	TArray<CableSim::FCollisionTriangle> CoincidentBox = CableSimTautTests::MakeBoxTriangles();
+	for (CableSim::FCollisionTriangle& Triangle : CoincidentBox)
+	{
+		Triangle.Id.ObjectToken = 3;
+	}
+	Overlap.Append(CoincidentBox);
+	CableSim::FTautStaticTopology RejectedOverlap;
+	TestFalse(TEXT("Penetrating static convex shapes are rejected"),
+		RejectedOverlap.Build(Overlap, 1.e-6, 8));
+	TestEqual(TEXT("The overlap failure is explicit"),
+		RejectedOverlap.GetDiagnostics().Issue, CableSim::ETautTopologyIssue::OverlappingShapes);
+
+	TArray<CableSim::FCollisionTriangle> DisjointWithOverlappingBounds = Forward;
+	TArray<CableSim::FCollisionTriangle> RotatedBox = CableSimTautTests::MakeBoxTriangles();
+	const double C = FMath::Sqrt(0.5);
+	for (CableSim::FCollisionTriangle& Triangle : RotatedBox)
+	{
+		Triangle.Id.ObjectToken = 4;
+		for (FVector3d& Position : Triangle.Vertices)
+		{
+			const FVector3d Original = Position;
+			Position.X = C * Original.X - C * Original.Y + 2.2;
+			Position.Y = C * Original.X + C * Original.Y + 2.2;
+		}
+	}
+	DisjointWithOverlappingBounds.Append(RotatedBox);
+	CableSim::FTautStaticTopology ExactOverlapTest;
+	TestTrue(TEXT("Overlapping AABBs do not reject separated rotated convexes"),
+		ExactOverlapTest.Build(DisjointWithOverlappingBounds, 1.e-6, 8));
 	return true;
 }
 
@@ -450,19 +523,89 @@ bool FCableSimTautParallelUnrollTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautCoplanarUnrollTest,
+	"CableSim.Core.Taut.CoplanarNonParallelEdgesUnrollToLine",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautCoplanarUnrollTest::RunTest(const FString& Parameters)
+{
+	CableSimTautTests::FOwnedScene Scene;
+	CableSim::FCollisionEdge First;
+	First.Id = {11, 0, CableSim::ECollisionFeatureType::Edge, 0, 1};
+	First.GeometryType = CableSim::ECollisionGeometryType::Convex;
+	First.bStaticObject = true;
+	First.Start = {3.0, -5.0, 0.0};
+	First.End = {3.0, 5.0, 0.0};
+	First.FaceNormal0 = {-1.0, 0.0, 0.0};
+	First.FaceNormal1 = {1.0, 0.0, 0.0};
+	First.Kind = CableSim::ECollisionEdgeKind::Convex;
+	CableSim::FCollisionEdge Second;
+	Second.Id = {11, 0, CableSim::ECollisionFeatureType::Edge, 2, 3};
+	Second.GeometryType = CableSim::ECollisionGeometryType::Convex;
+	Second.bStaticObject = true;
+	Second.Start = {5.0, -5.0, 0.0};
+	Second.End = {9.0, 5.0, 0.0};
+	Second.FaceNormal0 = FVector3d(-10.0, 4.0, 0.0).GetSafeNormal();
+	Second.FaceNormal1 = -Second.FaceNormal0;
+	Second.Kind = CableSim::ECollisionEdgeKind::Convex;
+	Scene.Edges = {First, Second};
+
+	CableSim::FTautStateSnapshot Snapshot;
+	Snapshot.Config = CableSim::FTautConfig{};
+	Snapshot.Config.MovementConvergenceTolerance = 1.e-9;
+	CableSim::FTautPoint A;
+	A.Type = CableSim::ETautPointType::Endpoint;
+	A.Position = {0.0, 0.0, 0.0};
+	CableSim::FTautPoint Contact0;
+	Contact0.Type = CableSim::ETautPointType::EdgeContact;
+	Contact0.FeatureId = First.Id;
+	Contact0.Position = {3.0, 2.0, 0.0};
+	Contact0.EdgeParameter = 0.7;
+	CableSim::FTautPoint Contact1;
+	Contact1.Type = CableSim::ETautPointType::EdgeContact;
+	Contact1.FeatureId = Second.Id;
+	Contact1.Position = {6.2, -2.0, 0.0};
+	Contact1.EdgeParameter = 0.3;
+	CableSim::FTautPoint B;
+	B.Type = CableSim::ETautPointType::Endpoint;
+	B.Position = {10.0, 0.0, 0.0};
+	Snapshot.Points = {A, Contact0, Contact1, B};
+
+	CableSim::FTautPathSolver Solver;
+	TestTrue(TEXT("The non-parallel coplanar seed restores"), Solver.RestoreState(Snapshot));
+	const CableSim::FTautStepResult Result = Solver.AdvanceStep(
+		CableSimTautTests::MakeInput(A.Position, B.Position), Scene.View());
+	TestTrue(TEXT("The coplanar solve remains valid and collision free"),
+		(Result.Status == CableSim::ETautStatus::Ready
+			|| Result.Status == CableSim::ETautStatus::NoRelevantGeometry)
+		&& Result.bPathCollisionFree);
+	TestEqual(TEXT("The two edge contacts remain in the route"), Result.ContactCount, 2);
+	TestTrue(TEXT("The unfolded route is the exact straight chord"),
+		FMath::IsNearlyEqual(Result.PathLength, 10.0, 1.e-6));
+	const TArray<CableSim::FTautPoint>& Points = Solver.GetPoints();
+	if (Points.Num() == 4)
+	{
+		TestTrue(TEXT("The first non-parallel edge is intersected exactly"),
+			Points[1].Position.Equals(FVector3d(3.0, 0.0, 0.0), 1.e-6));
+		TestTrue(TEXT("The second non-parallel edge is intersected exactly"),
+			Points[2].Position.Equals(FVector3d(7.0, 0.0, 0.0), 1.e-6));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautCornerResolutionTest,
 	"CableSim.Core.Taut.CornerResolutionIsOptimal",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCableSimTautCornerResolutionTest::RunTest(const FString& Parameters)
 {
-	// Put a contact exactly on a real compiled cube corner (via a restored state)
-	// and resolve it against a spread of neighbour positions. The vertex resolver
-	// must, for every case, choose a collision-free path no longer than simply
-	// staying on the corner -- the shortest-path invariant behind the stay / single
-	// / split (outer-corner) decision. This directly exercises the split branch:
-	// whenever routing across two of the corner's edges is shorter than one edge or
-	// the vertex, the resolver takes it, and that path is still valid.
+	// Put a contact exactly on a real compiled cube corner and resolve it against
+	// a spread of neighbour positions. The talk's oriented classifier may retain
+	// a stable inner contact, slide out along one edge, or split an outer contact
+	// into an ordered pair. An outer route can be longer than the chord through the
+	// vertex because that chord crosses the forbidden solid sector; continuity and
+	// collision freedom, not a homotopy-blind vertex shortcut, are the invariants.
 	const double S = 50.0;
 	CableSimTautTests::FOwnedScene Scene;
 	Scene.Triangles = CableSimTautTests::MakeBoxTriangles();
@@ -505,6 +648,7 @@ bool FCableSimTautCornerResolutionTest::RunTest(const FString& Parameters)
 
 	int32 SplitCount = 0;
 	int32 EvaluatedCount = 0;
+	int32 ActionCounts[9] = {};
 	for (const FVector3d& Previous : Samples)
 	{
 		for (const FVector3d& Next : Samples)
@@ -540,20 +684,145 @@ bool FCableSimTautCornerResolutionTest::RunTest(const FString& Parameters)
 				continue;
 			}
 			++EvaluatedCount;
+			for (const CableSim::FTautPairDecision& Decision : Solver.GetLastPairDecisions())
+			{
+				++ActionCounts[static_cast<uint8>(Decision.Action)];
+			}
 			const double StayLength = FVector3d::Distance(Previous, Corner->Position)
 				+ FVector3d::Distance(Corner->Position, Next);
 			TestTrue(TEXT("Resolved corner path is collision free"), Result.bPathCollisionFree);
-			TestTrue(TEXT("Resolved corner path is never longer than staying on the vertex"),
-				Result.PathLength <= StayLength + 0.5);
+			if (Result.ContactCount < 2)
+			{
+				TestTrue(TEXT("A stable/single-edge resolution is no longer than staying on the vertex"),
+					Result.PathLength <= StayLength + 0.5);
+			}
 			if (Result.ContactCount >= 2)
 			{
 				++SplitCount;
+				const TArray<CableSim::FTautPoint>& Points = Solver.GetPoints();
+				TestTrue(TEXT("An outer corner resolves to two interior edge contacts"),
+					Points.Num() >= 4
+					&& Points[1].Type == CableSim::ETautPointType::EdgeContact
+					&& Points[2].Type == CableSim::ETautPointType::EdgeContact);
+				if (Points.Num() >= 4)
+				{
+					TestTrue(TEXT("The ordered outer contacts use different edges"),
+						Points[1].FeatureId != Points[2].FeatureId);
+					TestTrue(TEXT("The outer split leaves the degenerate vertex seed continuously"),
+						FVector3d::Distance(Points[1].Position, Points[2].Position) > 1.e-4);
+				}
+
+				CableSim::FTautPathSolver ReplaySolver;
+				TestTrue(TEXT("The corner seed can be replayed"), ReplaySolver.RestoreState(Snapshot));
+				ReplaySolver.AdvanceStep(CableSimTautTests::MakeInput(Previous, Next), Scene.View());
+				TestTrue(TEXT("Outer-corner ordering is deterministic"),
+					CableSimTautTests::PointsEqual(Solver.GetPoints(), ReplaySolver.GetPoints()));
 			}
 		}
 	}
 	TestTrue(TEXT("At least some corner cases were evaluated"), EvaluatedCount > 0);
+	TestTrue(TEXT("The real cube fixtures exercise the outer-corner split"), SplitCount > 0);
+	TestTrue(TEXT("Singular pair predicates conservatively hold a prior state"), ActionCounts[0] > 0);
+	TestTrue(TEXT("Stable inner-corner classification is exercised"), ActionCounts[1] > 0);
+	TestTrue(TEXT("Move-Along A/B classification is exercised"),
+		ActionCounts[2] + ActionCounts[3] > 0);
+	TestTrue(TEXT("Unstable choose-A-or-B classification is exercised"), ActionCounts[4] > 0);
+	TestTrue(TEXT("Side-edge ignore classification is exercised"),
+		ActionCounts[5] + ActionCounts[6] > 0);
+	TestTrue(TEXT("Both ordered outer-corner classifications are exercised"),
+		ActionCounts[7] > 0 && ActionCounts[8] > 0);
 	AddInfo(FString::Printf(
-		TEXT("Corner resolution: evaluated=%d splitCases=%d"), EvaluatedCount, SplitCount));
+		TEXT("Corner resolution: evaluated=%d splitCases=%d actions=[%d,%d,%d,%d,%d,%d,%d,%d,%d]"),
+		EvaluatedCount, SplitCount,
+		ActionCounts[0], ActionCounts[1], ActionCounts[2], ActionCounts[3], ActionCounts[4],
+		ActionCounts[5], ActionCounts[6], ActionCounts[7], ActionCounts[8]));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautReverseCornerMergeTest,
+	"CableSim.Core.Taut.ReverseOuterContactsMergeAtSharedVertex",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautReverseCornerMergeTest::RunTest(const FString& Parameters)
+{
+	CableSimTautTests::FOwnedScene Scene = CableSimTautTests::MakeBoxScene();
+	const CableSim::FCollisionVertex& Corner = Scene.Vertices.Last();
+	if (!TestTrue(TEXT("The test corner has two incident edges"), Corner.IncidentEdges.Num() >= 2))
+	{
+		return false;
+	}
+	auto FindEdge = [&Scene](const CableSim::FCollisionFeatureId& Id)
+	{
+		return Scene.Edges.FindByPredicate([&Id](const CableSim::FCollisionEdge& Edge)
+		{
+			return Edge.Id == Id;
+		});
+	};
+	const CableSim::FCollisionEdge* FirstEdge = FindEdge(Corner.IncidentEdges[0]);
+	const CableSim::FCollisionEdge* SecondEdge = FindEdge(Corner.IncidentEdges[1]);
+	if (!TestNotNull(TEXT("The incident edges are published"), FirstEdge)
+		|| !TestNotNull(TEXT("The second incident edge is published"), SecondEdge))
+	{
+		return false;
+	}
+	const FVector3d Samples[] = {
+		Corner.Position + FVector3d(3.0, -2.0, -4.0),
+		Corner.Position + FVector3d(-4.0, 3.0, -2.0),
+		Corner.Position + FVector3d(-2.0, -4.0, 3.0),
+		Corner.Position + FVector3d(4.0, 4.0, 4.0)};
+	int32 StableMergeCount = 0;
+	for (const FVector3d& Previous : Samples)
+	{
+		for (const FVector3d& Next : Samples)
+		{
+			if (Previous.Equals(Next))
+			{
+				continue;
+			}
+			CableSim::FTautStateSnapshot Snapshot;
+			Snapshot.Config = CableSim::FTautConfig{};
+			CableSim::FTautPoint Start;
+			Start.Type = CableSim::ETautPointType::Endpoint;
+			Start.Position = Previous;
+			CableSim::FTautPoint FirstContact;
+			FirstContact.Type = CableSim::ETautPointType::EdgeContact;
+			FirstContact.FeatureId = FirstEdge->Id;
+			FirstContact.Position = Corner.Position;
+			FirstContact.EdgeParameter = FVector3d::Distance(FirstEdge->Start, Corner.Position) < 1.e-6
+				? 0.0 : 1.0;
+			CableSim::FTautPoint SecondContact;
+			SecondContact.Type = CableSim::ETautPointType::EdgeContact;
+			SecondContact.FeatureId = SecondEdge->Id;
+			SecondContact.Position = Corner.Position;
+			SecondContact.EdgeParameter = FVector3d::Distance(SecondEdge->Start, Corner.Position) < 1.e-6
+				? 0.0 : 1.0;
+			CableSim::FTautPoint End;
+			End.Type = CableSim::ETautPointType::Endpoint;
+			End.Position = Next;
+			Snapshot.Points = {Start, FirstContact, SecondContact, End};
+			CableSim::FTautPathSolver Solver;
+			if (!Solver.RestoreState(Snapshot))
+			{
+				continue;
+			}
+			const CableSim::FTautStepResult Result = Solver.AdvanceStep(
+				CableSimTautTests::MakeInput(Previous, Next), Scene.View());
+			const TArray<CableSim::FTautPoint>& Points = Solver.GetPoints();
+			if ((Result.Status == CableSim::ETautStatus::Ready
+					|| Result.Status == CableSim::ETautStatus::NoRelevantGeometry)
+				&& Points.Num() == 3
+				&& Points[1].Type == CableSim::ETautPointType::VertexContact
+				&& Points[1].FeatureId == Corner.Id)
+			{
+				++StableMergeCount;
+				TestTrue(TEXT("Reverse merge retains the shared geometric position"),
+					Points[1].Position.Equals(Corner.Position, 1.e-9));
+			}
+		}
+	}
+	TestTrue(TEXT("At least one reverse route merges the two contacts into the shared vertex"),
+		StableMergeCount > 0);
 	return true;
 }
 

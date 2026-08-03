@@ -163,6 +163,7 @@ namespace CableSim
 		Config = FTautConfig{};
 		LastResult = FTautStepResult{};
 		LastReplayFrame = FTautReplayFrame{};
+		LastPairDecisions.Reset();
 		StepIndex = 0;
 	}
 
@@ -170,6 +171,7 @@ namespace CableSim
 		const FTautStepInput& Input,
 		const FTautCollisionScene& Scene)
 	{
+		LastPairDecisions.Reset();
 		if (!IsInitialized())
 		{
 			LastResult.Status = ETautStatus::Uninitialized;
@@ -247,6 +249,100 @@ namespace CableSim
 			}
 			Targets[0] = Input.StartTarget;
 			Targets.Last() = Input.EndTarget;
+
+			// A fully coplanar run is more general than the parallel-edge special
+			// case below: after unfolding, the taut route is one straight chord. If
+			// that chord intersects every finite contact edge in path order, seed the
+			// exact intersections directly. Unsupported/skew runs simply keep the
+			// normal coordinate iteration.
+			for (int32 RunStart = 1; RunStart + 1 < Points.Num(); )
+			{
+				if (Points[RunStart].Type != ETautPointType::EdgeContact)
+				{
+					++RunStart;
+					continue;
+				}
+				int32 RunEnd = RunStart;
+				TArray<const FCollisionEdge*, TInlineAllocator<8>> RunEdges;
+				while (RunEnd + 1 < Points.Num() && Points[RunEnd].Type == ETautPointType::EdgeContact)
+				{
+					const FCollisionEdge* Edge = FindEdge(Points[RunEnd].FeatureId, Scene);
+					if (!Edge)
+					{
+						break;
+					}
+					RunEdges.Add(Edge);
+					++RunEnd;
+				}
+				--RunEnd;
+				if (RunEdges.Num() >= 2)
+				{
+					const FVector3d A = Targets[RunStart - 1];
+					const FVector3d B = Targets[RunEnd + 1];
+					const FVector3d Chord = B - A;
+					FVector3d PlaneNormal = FVector3d::ZeroVector;
+					for (const FCollisionEdge* Edge : RunEdges)
+					{
+						PlaneNormal = FVector3d::CrossProduct(Chord, Edge->End - Edge->Start).GetSafeNormal();
+						if (!PlaneNormal.IsNearlyZero())
+						{
+							break;
+						}
+					}
+					bool bCoplanar = !PlaneNormal.IsNearlyZero();
+					for (const FCollisionEdge* Edge : RunEdges)
+					{
+						bCoplanar &= FMath::Abs(FVector3d::DotProduct(
+							Edge->Start - A, PlaneNormal)) <= Config.TopologyTolerance;
+						bCoplanar &= FMath::Abs(FVector3d::DotProduct(
+							Edge->End - A, PlaneNormal)) <= Config.TopologyTolerance;
+					}
+					TArray<FVector3d, TInlineAllocator<8>> Intersections;
+					double PreviousChordParameter = -Config.ParametricTolerance;
+					for (const FCollisionEdge* Edge : RunEdges)
+					{
+						const FVector3d EdgeVector = Edge->End - Edge->Start;
+						const FVector3d Relative = A - Edge->Start;
+						const double ChordSquared = Chord.SquaredLength();
+						const double EdgeSquared = EdgeVector.SquaredLength();
+						const double Mixed = FVector3d::DotProduct(Chord, EdgeVector);
+						const double ChordRelative = FVector3d::DotProduct(Chord, Relative);
+						const double EdgeRelative = FVector3d::DotProduct(EdgeVector, Relative);
+						const double Denominator = ChordSquared * EdgeSquared - Mixed * Mixed;
+						if (!bCoplanar || Denominator <= UE_DOUBLE_SMALL_NUMBER)
+						{
+							bCoplanar = false;
+							break;
+						}
+						const double ChordParameter =
+							(Mixed * EdgeRelative - EdgeSquared * ChordRelative) / Denominator;
+						const double EdgeParameter =
+							(ChordSquared * EdgeRelative - Mixed * ChordRelative) / Denominator;
+						const FVector3d OnChord = A + ChordParameter * Chord;
+						const FVector3d OnEdge = Edge->Start + EdgeParameter * EdgeVector;
+						if (ChordParameter < PreviousChordParameter
+							|| ChordParameter < -Config.ParametricTolerance
+							|| ChordParameter > 1.0 + Config.ParametricTolerance
+							|| EdgeParameter < -Config.ParametricTolerance
+							|| EdgeParameter > 1.0 + Config.ParametricTolerance
+							|| FVector3d::Distance(OnChord, OnEdge) > Config.TopologyTolerance)
+						{
+							bCoplanar = false;
+							break;
+						}
+						PreviousChordParameter = ChordParameter;
+						Intersections.Add(OnEdge);
+					}
+					if (bCoplanar && Intersections.Num() == RunEdges.Num())
+					{
+						for (int32 Index = 0; Index < Intersections.Num(); ++Index)
+						{
+							Targets[RunStart + Index] = Intersections[Index];
+						}
+					}
+				}
+				RunStart = FMath::Max(RunEnd + 1, RunStart + 1);
+			}
 
 			// A run of consecutive edge contacts on parallel edges has a closed-form
 			// taut solution: unroll the edges into a plane and draw one straight line.
@@ -339,7 +435,11 @@ namespace CableSim
 					const int32 PointIndex = bForward ? Visit : Points.Num() - 1 - Visit;
 					const FTautPoint& Point = Points[PointIndex];
 					FVector3d NewTarget = Targets[PointIndex];
-					if (Point.Type == ETautPointType::EdgeContact)
+					if (Point.bHasPendingTarget)
+					{
+						NewTarget = Point.PendingTarget;
+					}
+					else if (Point.Type == ETautPointType::EdgeContact)
 					{
 						const FCollisionEdge* Edge = FindEdge(Point.FeatureId, Scene);
 						if (!Edge)
@@ -388,6 +488,7 @@ namespace CableSim
 				if (FVector3d::Distance(MovingStart, MovingTarget) <= Config.MovementConvergenceTolerance)
 				{
 					Points[PointIndex].Position = MovingTarget;
+					Points[PointIndex].bHasPendingTarget = false;
 					continue;
 				}
 
@@ -416,24 +517,24 @@ namespace CableSim
 					if (FindFirstSweepHit(
 						Points[PointIndex + 1].Position, MovingStart, MovingTarget,
 						Scene, IgnoredFeature, Config.TopologyTolerance,
-						Config.ParametricTolerance, Hit)
-						&& (!bHasHit
-							|| Hit.MovementTime < BestHit.MovementTime - Config.ParametricTolerance
-							|| (FMath::IsNearlyEqual(
-								Hit.MovementTime, BestHit.MovementTime, Config.ParametricTolerance)
-								&& FCollisionFeatureId::Less(
-									Scene.Edges[Hit.EdgeArrayIndex].Id,
-									Scene.Edges[BestHit.EdgeArrayIndex].Id))))
+						Config.ParametricTolerance, Hit))
 					{
-						BestHit = Hit;
-						bHitLeft = false;
-						bHasHit = true;
+						const bool bCandidateWins = !bHasHit
+							|| Hit.MovementTime < BestHit.MovementTime - Config.ParametricTolerance;
+						MergeSweepHits(
+							Hit, Config.TopologyTolerance, Config.ParametricTolerance,
+							BestHit, bHasHit);
+						if (bCandidateWins)
+						{
+							bHitLeft = false;
+						}
 					}
 				}
 
 				if (!bHasHit)
 				{
 					Points[PointIndex].Position = MovingTarget;
+					Points[PointIndex].bHasPendingTarget = false;
 					continue;
 				}
 				if (Points.Num() >= Config.MaximumPathPoints)
@@ -446,14 +547,34 @@ namespace CableSim
 				}
 				Points[PointIndex].Position = FMath::Lerp(
 					MovingStart, MovingTarget, BestHit.MovementTime);
-				const FCollisionEdge& HitEdge = Scene.Edges[BestHit.EdgeArrayIndex];
 				FTautPoint Contact;
-				Contact.Type = ETautPointType::EdgeContact;
-				Contact.FeatureId = HitEdge.Id;
 				Contact.Position = BestHit.Position;
-				const double EdgeLength = FVector3d::Distance(HitEdge.Start, HitEdge.End);
-				Contact.EdgeParameter = EdgeLength > Config.TopologyTolerance
-					? FVector3d::Distance(HitEdge.Start, BestHit.Position) / EdgeLength : 0.0;
+				if (const FCollisionVertex* HitVertex = FindSharedVertex(
+					BestHit.EdgeArrayIndices, BestHit.Position, Scene, Config.TopologyTolerance))
+				{
+					Contact.Type = ETautPointType::VertexContact;
+					Contact.FeatureId = HitVertex->Id;
+					Contact.Position = HitVertex->Position;
+					if (!BestHit.EdgeArrayIndices.IsEmpty())
+					{
+						Contact.HistoryFeatureId0 = Scene.Edges[BestHit.EdgeArrayIndices[0]].Id;
+					}
+				}
+				else
+				{
+					const int32 HitEdgeIndex = BestHit.EdgeArrayIndices.IsEmpty()
+						? INDEX_NONE : BestHit.EdgeArrayIndices[0];
+					if (!Scene.Edges.IsValidIndex(HitEdgeIndex))
+					{
+						return Fail(ETautStatus::NumericalFailure);
+					}
+					const FCollisionEdge& HitEdge = Scene.Edges[HitEdgeIndex];
+					Contact.Type = ETautPointType::EdgeContact;
+					Contact.FeatureId = HitEdge.Id;
+					const double EdgeLength = FVector3d::Distance(HitEdge.Start, HitEdge.End);
+					Contact.EdgeParameter = EdgeLength > Config.TopologyTolerance
+						? FVector3d::Distance(HitEdge.Start, BestHit.Position) / EdgeLength : 0.0;
+				}
 				const int32 InsertIndex = bHitLeft ? PointIndex : PointIndex + 1;
 				Points.Insert(Contact, InsertIndex);
 				bCollisionAdded = true;
@@ -465,6 +586,53 @@ namespace CableSim
 			}
 
 			bool bTopologyChanged = false;
+			// The reverse of an outer-corner split is two ordered edge contacts arriving
+			// at their shared vertex.  Merge before classifying the vertex again.  Fresh
+			// split contacts carry pending targets and must be allowed to separate first.
+			for (int32 PointIndex = 1; PointIndex + 2 < Points.Num(); ++PointIndex)
+			{
+				FTautPoint& First = Points[PointIndex];
+				const FTautPoint& Second = Points[PointIndex + 1];
+				if (First.Type != ETautPointType::EdgeContact
+					|| Second.Type != ETautPointType::EdgeContact
+					|| First.bHasPendingTarget || Second.bHasPendingTarget
+					|| FVector3d::Distance(First.Position, Second.Position) > Config.TopologyTolerance)
+				{
+					continue;
+				}
+				const FCollisionVertex* SharedVertex = nullptr;
+				for (const FCollisionVertex& CandidateVertex : Scene.Vertices)
+				{
+					if (FVector3d::Distance(CandidateVertex.Position, First.Position) <= Config.TopologyTolerance
+						&& CandidateVertex.IncidentEdges.Contains(First.FeatureId)
+						&& CandidateVertex.IncidentEdges.Contains(Second.FeatureId))
+					{
+						SharedVertex = &CandidateVertex;
+						break;
+					}
+				}
+				if (!SharedVertex)
+				{
+					continue;
+				}
+				First.Type = ETautPointType::VertexContact;
+				First.Position = SharedVertex->Position;
+				First.HistoryFeatureId0 = First.FeatureId;
+				First.HistoryFeatureId1 = Second.FeatureId;
+				First.FeatureId = SharedVertex->Id;
+				First.EdgeParameter = 0.0;
+				Points.RemoveAt(PointIndex + 1);
+				bTopologyChanged = true;
+				break;
+			}
+			if (bTopologyChanged)
+			{
+				if (++TopologyEvents > Config.MaximumTopologyEvents)
+				{
+					return EmitBestEffort(ETautStatus::TopologyBudgetExceeded);
+				}
+				continue;
+			}
 			for (int32 PointIndex = Points.Num() - 2; PointIndex >= 1; --PointIndex)
 			{
 				FTautPoint& Point = Points[PointIndex];
@@ -497,8 +665,8 @@ namespace CableSim
 							&& SegmentIsCollisionFree(
 								Previous, Next, Scene, Config.TopologyTolerance,
 								Config.ParametricTolerance)
-							&& !StraighteningCrossesEdge(
-								Previous, ContactPosition, Next, Point.FeatureId, Scene,
+							&& CanReleaseEdgeContact(
+								Previous, ContactPosition, Next, *Edge, Scene,
 								Config.TopologyTolerance, Config.ParametricTolerance))
 						{
 							Points.RemoveAt(PointIndex);
@@ -518,6 +686,8 @@ namespace CableSim
 						return Fail(ETautStatus::FeatureUnavailable, VertexId);
 					}
 					Point.Type = ETautPointType::VertexContact;
+					Point.HistoryFeatureId0 = Point.FeatureId;
+					Point.HistoryFeatureId1 = {};
 					Point.FeatureId = VertexId;
 					Point.Position = Vertex->Position;
 					Point.EdgeParameter = 0.0;
@@ -538,12 +708,15 @@ namespace CableSim
 				for (const FCollisionFeatureId& IncidentId : Vertex->IncidentEdges)
 				{
 					const FCollisionEdge* Incident = FindEdge(IncidentId, Scene);
-					if (Incident && IsUsableEdge(*Incident, Config.TopologyTolerance)
-						&& RequiresWrap(Previous, Next, *Incident, Config.TopologyTolerance))
+					if (Incident && IsUsableEdge(*Incident, Config.TopologyTolerance))
 					{
 						Candidates.Add(Incident);
 					}
 				}
+				Candidates.Sort([](const FCollisionEdge& First, const FCollisionEdge& Second)
+				{
+					return FCollisionFeatureId::Less(First.Id, Second.Id);
+				});
 				if (Candidates.Num() > Config.MaximumIncidentEdges)
 				{
 					return Fail(ETautStatus::TopologyOverValence, Point.FeatureId);
@@ -561,60 +734,215 @@ namespace CableSim
 					continue;
 				}
 
-				// Resolve the vertex to the shortest collision-free local path: stay on
-				// the vertex, or slide onto whichever single incident edge is shorter and
-				// stays collision-free. An edge that would not shorten the path is never
-				// chosen.
-				constexpr int32 ResolveStay = 0;
-				constexpr int32 ResolveSingle = 1;
-				auto EdgeParameterOf = [](const FCollisionEdge& Edge, const FVector3d& Position, const double Tolerance)
+				TArray<FPairClassification, TInlineAllocator<28>> Pairs;
+				bool bSingularPair = false;
+				for (int32 A = 0; A < Candidates.Num(); ++A)
 				{
-					const double Length = FVector3d::Distance(Edge.Start, Edge.End);
-					return Length > Tolerance ? FVector3d::Distance(Edge.Start, Position) / Length : 0.0;
+					for (int32 B = A + 1; B < Candidates.Num(); ++B)
+					{
+						FPairClassification& Pair = Pairs.Add_GetRef(ClassifyEdgePair(
+							Previous, Next, *Vertex, *Candidates[A], *Candidates[B],
+							Config.TopologyTolerance));
+						bSingularPair |= Pair.Action == ETautPairAction::Singular;
+						if (LastPairDecisions.Num() < 128)
+						{
+							LastPairDecisions.Add({
+								Vertex->Id,
+								Pair.EdgeA ? Pair.EdgeA->Id : FCollisionFeatureId{},
+								Pair.EdgeB ? Pair.EdgeB->Id : FCollisionFeatureId{},
+								Pair.Action});
+						}
+					}
+				}
+
+				// A parallel/face-aligned predicate has no defensible instantaneous side.
+				// Keep the previous valid vertex state rather than allowing noise to flip it.
+				if (bSingularPair)
+				{
+					Point.Position = Vertex->Position;
+					continue;
+				}
+
+				TSet<FCollisionFeatureId> Ignored;
+				for (const FPairClassification& Pair : Pairs)
+				{
+					if (Pair.Action == ETautPairAction::IgnoreA)
+					{
+						Ignored.Add(Pair.EdgeA->Id);
+					}
+					else if (Pair.Action == ETautPairAction::IgnoreB)
+					{
+						Ignored.Add(Pair.EdgeB->Id);
+					}
+				}
+				auto IsActive = [&Ignored](const FCollisionEdge* Edge)
+				{
+					return !Ignored.Contains(Edge->Id);
 				};
 
-				int32 BestResolution = ResolveStay;
-				double BestLength = FVector3d::Distance(Previous, Vertex->Position)
-					+ FVector3d::Distance(Vertex->Position, Next);
-				const FCollisionEdge* BestEdgeA = nullptr;
-				FVector3d BestPosA = Vertex->Position;
-
-				for (const FCollisionEdge* Candidate : Candidates)
+				bool bStableInner = false;
+				for (const FPairClassification& Pair : Pairs)
 				{
-					FVector3d Position;
-					double Parameter = 0.0;
-					if (!CalculateContactPosition(
-						Previous, Next, *Candidate, Config.TopologyTolerance, Position, Parameter)
-						|| !SegmentIsCollisionFree(Previous, Position, Scene, Config.TopologyTolerance, Config.ParametricTolerance)
-						|| !SegmentIsCollisionFree(Position, Next, Scene, Config.TopologyTolerance, Config.ParametricTolerance))
+					bStableInner |= Pair.Action == ETautPairAction::StableInner
+						&& IsActive(Pair.EdgeA) && IsActive(Pair.EdgeB);
+				}
+				if (bStableInner)
+				{
+					Point.Position = Vertex->Position;
+					continue;
+				}
+
+				TSet<FCollisionFeatureId> Abandoned = Ignored;
+				auto ChooseUnstableEdge = [&](const FCollisionEdge* EdgeA, const FCollisionEdge* EdgeB)
+				{
+					if (Point.HistoryFeatureId0 == EdgeA->Id || Point.HistoryFeatureId1 == EdgeA->Id)
+					{
+						return EdgeA;
+					}
+					if (Point.HistoryFeatureId0 == EdgeB->Id || Point.HistoryFeatureId1 == EdgeB->Id)
+					{
+						return EdgeB;
+					}
+					auto OutwardSample = [&](const FCollisionEdge* Edge)
+					{
+						const FVector3d Other = FVector3d::Distance(Edge->Start, Vertex->Position)
+							<= Config.TopologyTolerance ? Edge->End : Edge->Start;
+						const FVector3d Direction = (Other - Vertex->Position).GetSafeNormal();
+						return Vertex->Position + Direction * (2.0 * Config.TopologyTolerance);
+					};
+					const double DistanceA = DistanceToPolyline(OutwardSample(EdgeA), Input.PreferredPolyline);
+					const double DistanceB = DistanceToPolyline(OutwardSample(EdgeB), Input.PreferredPolyline);
+					if (!FMath::IsNearlyEqual(DistanceA, DistanceB, Config.TopologyTolerance))
+					{
+						return DistanceA < DistanceB ? EdgeA : EdgeB;
+					}
+					return FCollisionFeatureId::Less(EdgeA->Id, EdgeB->Id) ? EdgeA : EdgeB;
+				};
+				for (const FPairClassification& Pair : Pairs)
+				{
+					if (!IsActive(Pair.EdgeA) || !IsActive(Pair.EdgeB))
 					{
 						continue;
 					}
-					const double Length = FVector3d::Distance(Previous, Position)
-						+ FVector3d::Distance(Position, Next);
-					const bool bShorter = Length < BestLength - Config.TopologyTolerance;
-					const bool bTieBreak = BestResolution == ResolveSingle && BestEdgeA
-						&& FMath::IsNearlyEqual(Length, BestLength, Config.TopologyTolerance)
-						&& FCollisionFeatureId::Less(Candidate->Id, BestEdgeA->Id);
-					if (bShorter || bTieBreak)
+					switch (Pair.Action)
 					{
-						BestResolution = ResolveSingle;
-						BestLength = Length;
-						BestEdgeA = Candidate;
-						BestPosA = Position;
+					case ETautPairAction::MoveAlongA:
+						Abandoned.Add(Pair.EdgeB->Id);
+						break;
+					case ETautPairAction::MoveAlongB:
+						Abandoned.Add(Pair.EdgeA->Id);
+						break;
+					case ETautPairAction::ChooseAOrB:
+					{
+						const FCollisionEdge* Chosen = ChooseUnstableEdge(Pair.EdgeA, Pair.EdgeB);
+						Abandoned.Add(Chosen == Pair.EdgeA ? Pair.EdgeB->Id : Pair.EdgeA->Id);
+						break;
+					}
+					default:
+						break;
 					}
 				}
 
-				if (BestResolution == ResolveSingle && BestEdgeA)
+				TArray<const FCollisionEdge*, TInlineAllocator<8>> Surviving;
+				for (const FCollisionEdge* Candidate : Candidates)
 				{
-					Point.Type = ETautPointType::EdgeContact;
-					Point.FeatureId = BestEdgeA->Id;
-					Point.Position = BestPosA;
-					Point.EdgeParameter = EdgeParameterOf(*BestEdgeA, BestPosA, Config.TopologyTolerance);
-					bTopologyChanged = true;
-					break;
+					if (!Abandoned.Contains(Candidate->Id))
+					{
+						Surviving.Add(Candidate);
+					}
 				}
-				// ResolveStay: the caught rope stays on the vertex; nothing changes.
+				auto MakeEdgeTransition = [&](const FCollisionEdge& Edge)
+				{
+					FTautPoint Transition;
+					Transition.Type = ETautPointType::EdgeContact;
+					Transition.FeatureId = Edge.Id;
+					Transition.Position = Vertex->Position;
+					Transition.HistoryFeatureId0 = Edge.Id;
+					const double EdgeLength = FVector3d::Distance(Edge.Start, Edge.End);
+					Transition.EdgeParameter = EdgeLength > Config.TopologyTolerance
+						? FVector3d::Distance(Edge.Start, Vertex->Position) / EdgeLength : 0.0;
+					double TargetParameter = 0.0;
+					FVector3d TargetPosition = Vertex->Position;
+					if (!CalculateContactPosition(
+						Previous, Next, Edge, Config.TopologyTolerance,
+						TargetPosition, TargetParameter))
+					{
+						const double Axis = CalculateUnclampedAxisPosition(
+							Previous, Next, Edge, Config.TopologyTolerance);
+						TargetParameter = FMath::Clamp(Axis / EdgeLength, 0.0, 1.0);
+						TargetPosition = FMath::Lerp(Edge.Start, Edge.End, TargetParameter);
+					}
+					Transition.PendingTarget = TargetPosition;
+					Transition.bHasPendingTarget = FVector3d::Distance(
+						TargetPosition, Vertex->Position) > Config.MovementConvergenceTolerance;
+					return Transition;
+				};
+
+				if (Surviving.IsEmpty())
+				{
+					if (SegmentIsCollisionFree(
+						Previous, Next, Scene, Config.TopologyTolerance,
+						Config.ParametricTolerance))
+					{
+						Points.RemoveAt(PointIndex);
+						bTopologyChanged = true;
+						break;
+					}
+					Point.Position = Vertex->Position;
+					continue;
+				}
+				if (Surviving.Num() == 1)
+				{
+					FTautPoint Transition = MakeEdgeTransition(*Surviving[0]);
+					if (Transition.bHasPendingTarget)
+					{
+						Point = MoveTemp(Transition);
+						bTopologyChanged = true;
+						break;
+					}
+					Point.Position = Vertex->Position;
+					continue;
+				}
+
+				if (Surviving.Num() == 2 && Points.Num() < Config.MaximumPathPoints)
+				{
+					const FCollisionEdge* FirstOuter = nullptr;
+					const FCollisionEdge* SecondOuter = nullptr;
+					for (const FPairClassification& Pair : Pairs)
+					{
+						const bool bMatches = (Pair.EdgeA == Surviving[0] && Pair.EdgeB == Surviving[1])
+							|| (Pair.EdgeA == Surviving[1] && Pair.EdgeB == Surviving[0]);
+						if (!bMatches)
+						{
+							continue;
+						}
+						if (Pair.Action == ETautPairAction::OuterAThenB)
+						{
+							FirstOuter = Pair.EdgeA;
+							SecondOuter = Pair.EdgeB;
+						}
+						else if (Pair.Action == ETautPairAction::OuterBThenA)
+						{
+							FirstOuter = Pair.EdgeB;
+							SecondOuter = Pair.EdgeA;
+						}
+					}
+					if (FirstOuter && SecondOuter)
+					{
+						FTautPoint FirstPoint = MakeEdgeTransition(*FirstOuter);
+						FTautPoint SecondPoint = MakeEdgeTransition(*SecondOuter);
+						if (FirstPoint.bHasPendingTarget && SecondPoint.bHasPendingTarget)
+						{
+							Point = MoveTemp(FirstPoint);
+							Points.Insert(MoveTemp(SecondPoint), PointIndex + 1);
+							bTopologyChanged = true;
+							break;
+						}
+					}
+				}
+
+				// Conflicting pair decisions, an unsupported outer chain, or a transition
+				// with no outward movement all degrade to the last safe vertex state.
 				Point.Position = Vertex->Position;
 			}
 			if (bTopologyChanged)
@@ -763,6 +1091,40 @@ namespace CableSim
 			}
 		}
 		return BestVertex;
+	}
+
+	const FCollisionVertex* FTautPathSolver::FindSharedVertex(
+		const TConstArrayView<int32> EdgeArrayIndices,
+		const FVector3d& Position,
+		const FTautCollisionScene& Scene,
+		const double Tolerance)
+	{
+		if (EdgeArrayIndices.IsEmpty())
+		{
+			return nullptr;
+		}
+		for (const FCollisionVertex& Vertex : Scene.Vertices)
+		{
+			if (FVector3d::Distance(Vertex.Position, Position) > Tolerance)
+			{
+				continue;
+			}
+			bool bContainsAll = true;
+			for (const int32 EdgeIndex : EdgeArrayIndices)
+			{
+				if (!Scene.Edges.IsValidIndex(EdgeIndex)
+					|| !Vertex.IncidentEdges.Contains(Scene.Edges[EdgeIndex].Id))
+				{
+					bContainsAll = false;
+					break;
+				}
+			}
+			if (bContainsAll)
+			{
+				return &Vertex;
+			}
+		}
+		return nullptr;
 	}
 
 	bool FTautPathSolver::SegmentIntersectsTriangle(
@@ -995,6 +1357,7 @@ namespace CableSim
 		FSweepHit& OutHit)
 	{
 		bool bFound = false;
+		OutHit = FSweepHit{};
 		for (int32 EdgeIndex = 0; EdgeIndex < Scene.Edges.Num(); ++EdgeIndex)
 		{
 			const FCollisionEdge& Edge = Scene.Edges[EdgeIndex];
@@ -1019,17 +1382,51 @@ namespace CableSim
 			const double MovingWeight = Barycentric.Y + Barycentric.Z;
 			const double MovementTime = MovingWeight > ParametricTolerance
 				? FMath::Clamp(Barycentric.Z / MovingWeight, 0.0, 1.0) : 0.0;
-			if (!bFound || MovementTime < OutHit.MovementTime - ParametricTolerance
-				|| (FMath::IsNearlyEqual(MovementTime, OutHit.MovementTime, ParametricTolerance)
-					&& FCollisionFeatureId::Less(Edge.Id, Scene.Edges[OutHit.EdgeArrayIndex].Id)))
+			if (!bFound || MovementTime < OutHit.MovementTime - ParametricTolerance)
 			{
 				bFound = true;
-				OutHit.EdgeArrayIndex = EdgeIndex;
+				OutHit.EdgeArrayIndices.Reset();
+				OutHit.EdgeArrayIndices.Add(EdgeIndex);
 				OutHit.MovementTime = MovementTime;
 				OutHit.Position = HitPosition;
 			}
+			else if (FMath::IsNearlyEqual(MovementTime, OutHit.MovementTime, ParametricTolerance)
+				&& FVector3d::Distance(HitPosition, OutHit.Position) <= DistanceTolerance)
+			{
+				OutHit.EdgeArrayIndices.Add(EdgeIndex);
+			}
 		}
+		OutHit.EdgeArrayIndices.Sort([&Scene](const int32 First, const int32 Second)
+		{
+			return FCollisionFeatureId::Less(Scene.Edges[First].Id, Scene.Edges[Second].Id);
+		});
 		return bFound;
+	}
+
+	void FTautPathSolver::MergeSweepHits(
+		const FSweepHit& Candidate,
+		const double DistanceTolerance,
+		const double ParametricTolerance,
+		FSweepHit& InOutBest,
+		bool& bInOutHasHit)
+	{
+		if (!bInOutHasHit || Candidate.MovementTime < InOutBest.MovementTime - ParametricTolerance)
+		{
+			InOutBest = Candidate;
+			bInOutHasHit = true;
+			return;
+		}
+		if (!FMath::IsNearlyEqual(
+			Candidate.MovementTime, InOutBest.MovementTime, ParametricTolerance)
+			|| FVector3d::Distance(Candidate.Position, InOutBest.Position) > DistanceTolerance)
+		{
+			return;
+		}
+		for (const int32 EdgeIndex : Candidate.EdgeArrayIndices)
+		{
+			InOutBest.EdgeArrayIndices.AddUnique(EdgeIndex);
+		}
+		InOutBest.EdgeArrayIndices.Sort();
 	}
 
 	bool FTautPathSolver::RequiresWrap(
@@ -1073,21 +1470,22 @@ namespace CableSim
 		return true;
 	}
 
-	bool FTautPathSolver::StraighteningCrossesEdge(
+	bool FTautPathSolver::CanReleaseEdgeContact(
 		const FVector3d& Previous,
 		const FVector3d& Contact,
 		const FVector3d& Next,
-		const FCollisionFeatureId& OwnEdge,
+		const FCollisionEdge& OwnEdge,
 		const FTautCollisionScene& Scene,
 		const double DistanceTolerance,
 		const double ParametricTolerance)
 	{
-		// Would collapsing the bend Previous -> Contact -> Next onto the straight chord
-		// Previous -> Next sweep the rope across another convex edge? Test each usable
-		// edge (except the one this contact rides) against the bend triangle.
+		// Collapsing Previous -> Contact -> Next onto the chord sweeps the bend triangle.
+		// It is a valid isolated-edge release only when no other convex edge crosses
+		// that swept surface.  The supporting edge is the tangential boundary at the
+		// start of the collapse and is intentionally excluded.
 		for (const FCollisionEdge& Edge : Scene.Edges)
 		{
-			if (Edge.Id == OwnEdge || !IsUsableEdge(Edge, DistanceTolerance))
+			if (Edge.Id == OwnEdge.Id || !IsUsableEdge(Edge, DistanceTolerance))
 			{
 				continue;
 			}
@@ -1097,10 +1495,184 @@ namespace CableSim
 				Edge.Start, Edge.End, Previous, Contact, Next,
 				ParametricTolerance, SegmentParameter, Barycentric))
 			{
-				return true;
+				return false;
 			}
 		}
-		return false;
+		return true;
+	}
+
+	FTautPathSolver::FPairClassification FTautPathSolver::ClassifyEdgePair(
+		const FVector3d& Previous,
+		const FVector3d& Next,
+		const FCollisionVertex& Vertex,
+		const FCollisionEdge& EdgeA,
+		const FCollisionEdge& EdgeB,
+		const double Tolerance)
+	{
+		FPairClassification Result;
+		Result.EdgeA = &EdgeA;
+		Result.EdgeB = &EdgeB;
+
+		const double LengthA = FVector3d::Distance(EdgeA.Start, EdgeA.End);
+		const double LengthB = FVector3d::Distance(EdgeB.Start, EdgeB.End);
+		const double AngularTolerance = FMath::Clamp(
+			Tolerance / FMath::Max(FMath::Min(LengthA, LengthB), Tolerance), 1.e-8, 1.e-3);
+		auto OrientEdge = [&](const FCollisionEdge& Edge, FVector3d& OutDirection)
+		{
+			OutDirection = (Edge.End - Edge.Start).GetSafeNormal();
+			const double Facing0 = FVector3d::DotProduct(
+				Edge.FaceNormal0, Previous - Vertex.Position);
+			const double Facing1 = FVector3d::DotProduct(
+				Edge.FaceNormal1, Previous - Vertex.Position);
+			const FVector3d FacingNormal = Facing0 >= Facing1 ? Edge.FaceNormal0 : Edge.FaceNormal1;
+			if (OutDirection.IsNearlyZero() || FMath::Max(Facing0, Facing1) <= Tolerance)
+			{
+				return false;
+			}
+			// Standing on the outward face and looking along +edge, cross(edge, normal)
+			// is screen-right.  Reverse the arbitrary stored endpoint order until the
+			// rope origin lies on that required side.
+			const double RightSide = FVector3d::DotProduct(
+				Previous - Vertex.Position,
+				FVector3d::CrossProduct(OutDirection, FacingNormal));
+			if (FMath::Abs(RightSide) <= Tolerance)
+			{
+				return false;
+			}
+			if (RightSide < 0.0)
+			{
+				OutDirection = -OutDirection;
+			}
+			return true;
+		};
+
+		FVector3d DirectionA;
+		FVector3d DirectionB;
+		if (!OrientEdge(EdgeA, DirectionA) || !OrientEdge(EdgeB, DirectionB))
+		{
+			return Result;
+		}
+		FVector3d PairNormal = FVector3d::CrossProduct(DirectionA, DirectionB);
+		const double PairNormalLength = PairNormal.Length();
+		if (PairNormalLength <= AngularTolerance)
+		{
+			return Result;
+		}
+		PairNormal /= PairNormalLength;
+		double PreviousHeight = FVector3d::DotProduct(Previous - Vertex.Position, PairNormal);
+		double NextHeight = FVector3d::DotProduct(Next - Vertex.Position, PairNormal);
+		if (FMath::Abs(PreviousHeight) <= Tolerance || FMath::Abs(NextHeight) <= Tolerance)
+		{
+			return Result;
+		}
+		if (PreviousHeight < 0.0)
+		{
+			PairNormal = -PairNormal;
+			PreviousHeight = -PreviousHeight;
+			NextHeight = -NextHeight;
+		}
+		const bool bDoubleCrossing = NextHeight > Tolerance;
+
+		auto OutwardDirection = [&](const FCollisionEdge& Edge)
+		{
+			const bool bVertexAtStart = FVector3d::Distance(
+				Edge.Start, Vertex.Position) <= Tolerance;
+			return ((bVertexAtStart ? Edge.End : Edge.Start) - Vertex.Position).GetSafeNormal();
+		};
+		const FVector3d OutwardA = OutwardDirection(EdgeA);
+		const FVector3d OutwardB = OutwardDirection(EdgeB);
+		if (OutwardA.IsNearlyZero() || OutwardB.IsNearlyZero())
+		{
+			return Result;
+		}
+		auto IsRightOf = [&](const FVector3d& OrientedEdge, const FVector3d& Ray, bool& bOutRight)
+		{
+			const double Signed = FVector3d::DotProduct(
+				FVector3d::CrossProduct(OrientedEdge, Ray), PairNormal);
+			if (FMath::Abs(Signed) <= AngularTolerance)
+			{
+				return false;
+			}
+			bOutRight = Signed < 0.0;
+			return true;
+		};
+		bool bAOnRightOfB = false;
+		bool bBOnRightOfA = false;
+		if (!IsRightOf(DirectionB, OutwardA, bAOnRightOfB)
+			|| !IsRightOf(DirectionA, OutwardB, bBOnRightOfA))
+		{
+			return Result;
+		}
+
+		if (bDoubleCrossing && bAOnRightOfB != bBOnRightOfA)
+		{
+			Result.Action = bAOnRightOfB
+				? ETautPairAction::OuterAThenB : ETautPairAction::OuterBThenA;
+			return Result;
+		}
+		if (!bDoubleCrossing && bAOnRightOfB != bBOnRightOfA)
+		{
+			// If B's physical ray is not on the required side of A, A blocks B.
+			Result.Action = !bBOnRightOfA ? ETautPairAction::IgnoreB : ETautPairAction::IgnoreA;
+			return Result;
+		}
+
+		auto WantsOutward = [&](const FCollisionEdge& Edge, const FVector3d& Outward)
+		{
+			const double Axis = CalculateUnclampedAxisPosition(
+				Previous, Next, Edge, Tolerance);
+			const FVector3d AxisPosition = Edge.Start
+				+ (Edge.End - Edge.Start).GetSafeNormal() * Axis;
+			return FVector3d::DotProduct(AxisPosition - Vertex.Position, Outward) > Tolerance;
+		};
+		const bool bOutA = WantsOutward(EdgeA, OutwardA);
+		const bool bOutB = WantsOutward(EdgeB, OutwardB);
+		if (bOutA && !bOutB)
+		{
+			Result.Action = ETautPairAction::MoveAlongA;
+		}
+		else if (!bOutA && bOutB)
+		{
+			Result.Action = ETautPairAction::MoveAlongB;
+		}
+		else if (bAOnRightOfB && bBOnRightOfA && !bOutA && !bOutB)
+		{
+			Result.Action = ETautPairAction::StableInner;
+		}
+		else if (bOutA && bOutB)
+		{
+			Result.Action = ETautPairAction::ChooseAOrB;
+		}
+		else
+		{
+			// The undisclosed fourth unstable subcase has no safe outward direction.
+			// Conservatively retain it as a caught inner contact.
+			Result.Action = ETautPairAction::StableInner;
+		}
+		return Result;
+	}
+
+	double FTautPathSolver::DistanceToPolyline(
+		const FVector3d& Position,
+		const TConstArrayView<FVector3d> Polyline)
+	{
+		if (Polyline.IsEmpty())
+		{
+			return 0.0;
+		}
+		double BestSquared = (Position - Polyline[0]).SquaredLength();
+		for (int32 Index = 0; Index + 1 < Polyline.Num(); ++Index)
+		{
+			const FVector3d Segment = Polyline[Index + 1] - Polyline[Index];
+			const double SegmentSquared = Segment.SquaredLength();
+			const double Parameter = SegmentSquared > UE_DOUBLE_SMALL_NUMBER
+				? FMath::Clamp(FVector3d::DotProduct(
+					Position - Polyline[Index], Segment) / SegmentSquared, 0.0, 1.0)
+				: 0.0;
+			const FVector3d Closest = Polyline[Index] + Parameter * Segment;
+			BestSquared = FMath::Min(BestSquared, (Position - Closest).SquaredLength());
+		}
+		return FMath::Sqrt(BestSquared);
 	}
 
 	double FTautPathSolver::CalculatePathLength(const TConstArrayView<FTautPoint> InPoints)
@@ -1122,7 +1694,8 @@ namespace CableSim
 		for (int32 Index = 0; Index < Points.Num(); ++Index)
 		{
 			const FTautPoint& Point = Points[Index];
-			if (!IsFinite(Point.Position) || !FMath::IsFinite(Point.EdgeParameter))
+			if (!IsFinite(Point.Position) || !FMath::IsFinite(Point.EdgeParameter)
+				|| (Point.bHasPendingTarget && !IsFinite(Point.PendingTarget)))
 			{
 				return false;
 			}

@@ -1,4 +1,5 @@
 #include "CableSimCollisionGeometry.h"
+#include "CableSimTautSolver.h"
 #include "Algo/Unique.h"
 
 namespace CableSim
@@ -374,5 +375,339 @@ namespace CableSim
 		}
 		Diagnostics.VertexCount = OutVertices.Num();
 		return Diagnostics;
+	}
+
+	namespace
+	{
+		struct FShapeKey
+		{
+			uint64 ObjectToken = 0;
+			int32 ShapeIndex = INDEX_NONE;
+
+			bool operator==(const FShapeKey& Other) const = default;
+		};
+
+		uint32 GetTypeHash(const FShapeKey& Key)
+		{
+			return HashCombineFast(::GetTypeHash(Key.ObjectToken), ::GetTypeHash(Key.ShapeIndex));
+		}
+
+		struct FConvexShapeData
+		{
+			FBox3d Bounds = FBox3d(ForceInit);
+			TArray<FVector3d> Positions;
+			TArray<FVector3d> FaceNormals;
+			TArray<FVector3d> EdgeDirections;
+			FCollisionFeatureId Feature;
+		};
+
+		void AddUniquePosition(TArray<FVector3d>& Positions, const FVector3d& Candidate, const double Tolerance)
+		{
+			if (!Positions.ContainsByPredicate([&Candidate, Tolerance](const FVector3d& Existing)
+			{
+				return Existing.Equals(Candidate, Tolerance);
+			}))
+			{
+				Positions.Add(Candidate);
+			}
+		}
+
+		void AddUniqueDirection(TArray<FVector3d>& Directions, const FVector3d& Candidate)
+		{
+			const FVector3d Normalized = Candidate.GetSafeNormal();
+			if (Normalized.IsNearlyZero()
+				|| Directions.ContainsByPredicate([&Normalized](const FVector3d& Existing)
+				{
+					return FMath::Abs(FVector3d::DotProduct(Existing, Normalized)) >= 1.0 - 1.e-6;
+				}))
+			{
+				return;
+			}
+			Directions.Add(Normalized);
+		}
+
+		bool HasSeparatingAxis(
+			const FConvexShapeData& First,
+			const FConvexShapeData& Second,
+			const FVector3d& Axis,
+			const double Tolerance)
+		{
+			if (Axis.IsNearlyZero())
+			{
+				return false;
+			}
+			double FirstMin = TNumericLimits<double>::Max();
+			double FirstMax = TNumericLimits<double>::Lowest();
+			double SecondMin = TNumericLimits<double>::Max();
+			double SecondMax = TNumericLimits<double>::Lowest();
+			for (const FVector3d& Position : First.Positions)
+			{
+				const double Projection = FVector3d::DotProduct(Position, Axis);
+				FirstMin = FMath::Min(FirstMin, Projection);
+				FirstMax = FMath::Max(FirstMax, Projection);
+			}
+			for (const FVector3d& Position : Second.Positions)
+			{
+				const double Projection = FVector3d::DotProduct(Position, Axis);
+				SecondMin = FMath::Min(SecondMin, Projection);
+				SecondMax = FMath::Max(SecondMax, Projection);
+			}
+			const double Overlap = FMath::Min(FirstMax, SecondMax) - FMath::Max(FirstMin, SecondMin);
+			return Overlap <= Tolerance;
+		}
+
+		bool ConvexShapesPenetrate(
+			const FConvexShapeData& First,
+			const FConvexShapeData& Second,
+			const double Tolerance)
+		{
+			const FVector3d BoundsPenetration = First.Bounds.Max.ComponentMin(Second.Bounds.Max)
+				- First.Bounds.Min.ComponentMax(Second.Bounds.Min);
+			if (BoundsPenetration.X <= Tolerance || BoundsPenetration.Y <= Tolerance
+				|| BoundsPenetration.Z <= Tolerance)
+			{
+				return false;
+			}
+			for (const FVector3d& Axis : First.FaceNormals)
+			{
+				if (HasSeparatingAxis(First, Second, Axis, Tolerance))
+				{
+					return false;
+				}
+			}
+			for (const FVector3d& Axis : Second.FaceNormals)
+			{
+				if (HasSeparatingAxis(First, Second, Axis, Tolerance))
+				{
+					return false;
+				}
+			}
+			for (const FVector3d& FirstEdge : First.EdgeDirections)
+			{
+				for (const FVector3d& SecondEdge : Second.EdgeDirections)
+				{
+					const FVector3d Axis = FVector3d::CrossProduct(FirstEdge, SecondEdge).GetSafeNormal();
+					if (!Axis.IsNearlyZero() && HasSeparatingAxis(First, Second, Axis, Tolerance))
+					{
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+
+		double PointSegmentDistance(
+			const FVector3d& Point,
+			const FVector3d& Start,
+			const FVector3d& End,
+			double& OutParameter)
+		{
+			const FVector3d Segment = End - Start;
+			const double LengthSquared = Segment.SquaredLength();
+			OutParameter = LengthSquared > UE_DOUBLE_SMALL_NUMBER
+				? FMath::Clamp(FVector3d::DotProduct(Point - Start, Segment) / LengthSquared, 0.0, 1.0)
+				: 0.0;
+			return FVector3d::Distance(Point, Start + OutParameter * Segment);
+		}
+
+		uint64 CalculateTopologyRevision(
+			const TConstArrayView<FCollisionTriangle> Triangles,
+			const TConstArrayView<FCollisionEdge> Edges,
+			const TConstArrayView<FCollisionVertex> Vertices)
+		{
+			uint32 Hash = HashCombineFast(::GetTypeHash(Triangles.Num()), ::GetTypeHash(Edges.Num()));
+			Hash = HashCombineFast(Hash, ::GetTypeHash(Vertices.Num()));
+			for (const FCollisionTriangle& Triangle : Triangles)
+			{
+				Hash = HashCombineFast(Hash, GetTypeHash(Triangle.Id));
+				for (const FVector3d& Position : Triangle.Vertices)
+				{
+					Hash = HashCombineFast(Hash, ::GetTypeHash(Position.X));
+					Hash = HashCombineFast(Hash, ::GetTypeHash(Position.Y));
+					Hash = HashCombineFast(Hash, ::GetTypeHash(Position.Z));
+				}
+			}
+			// Zero is reserved for an unpublished topology.
+			return static_cast<uint64>(Hash) + 1;
+		}
+	}
+
+	bool FTautStaticTopology::Build(
+		const TConstArrayView<FCollisionTriangle> InTriangles,
+		const double Tolerance,
+		const int32 MaximumIncidentEdges)
+	{
+		const double SafeTolerance = FMath::Max(Tolerance, 1.e-9);
+		TArray<FCollisionTriangle> CandidateTriangles(InTriangles);
+		CandidateTriangles.Sort([](const FCollisionTriangle& First, const FCollisionTriangle& Second)
+		{
+			return FCollisionFeatureId::Less(First.Id, Second.Id);
+		});
+
+		FTautTopologyDiagnostics CandidateDiagnostics;
+		for (int32 Index = 0; Index < CandidateTriangles.Num(); ++Index)
+		{
+			const FCollisionTriangle& Triangle = CandidateTriangles[Index];
+			if (!Triangle.Id.IsValid() || Triangle.Id.Type != ECollisionFeatureType::Triangle
+				|| !Triangle.IsFinite() || Triangle.CalculateNormal().IsNearlyZero())
+			{
+				CandidateDiagnostics.Issue = ETautTopologyIssue::InvalidFeature;
+				CandidateDiagnostics.Feature = Triangle.Id;
+				break;
+			}
+			if (!Triangle.bStaticObject
+				|| (Triangle.GeometryType != ECollisionGeometryType::Box
+					&& Triangle.GeometryType != ECollisionGeometryType::Convex))
+			{
+				CandidateDiagnostics.Issue = ETautTopologyIssue::UnsupportedGeometry;
+				CandidateDiagnostics.Feature = Triangle.Id;
+				break;
+			}
+			if (Index > 0 && Triangle.Id == CandidateTriangles[Index - 1].Id)
+			{
+				CandidateDiagnostics.Issue = ETautTopologyIssue::InvalidFeature;
+				CandidateDiagnostics.Feature = Triangle.Id;
+				break;
+			}
+		}
+
+		TArray<FCollisionEdge> CandidateEdges;
+		TArray<FCollisionVertex> CandidateVertices;
+		if (CandidateDiagnostics.IsValid())
+		{
+			CandidateDiagnostics.Compile = FCollisionTopologyCompiler::CompileTopology(
+				CandidateTriangles,
+				SafeTolerance,
+				FMath::Clamp(MaximumIncidentEdges, 1, 8),
+				CandidateEdges,
+				CandidateVertices);
+			for (const FCollisionEdge& Edge : CandidateEdges)
+			{
+				if (Edge.Kind == ECollisionEdgeKind::Boundary)
+				{
+					CandidateDiagnostics.Issue = ETautTopologyIssue::OpenBoundary;
+					CandidateDiagnostics.Feature = Edge.Id;
+					break;
+				}
+				if (Edge.Kind == ECollisionEdgeKind::NonManifold)
+				{
+					CandidateDiagnostics.Issue = ETautTopologyIssue::NonManifold;
+					CandidateDiagnostics.Feature = Edge.Id;
+					break;
+				}
+			}
+		}
+		if (CandidateDiagnostics.IsValid())
+		{
+			for (const FCollisionVertex& Vertex : CandidateVertices)
+			{
+				if (Vertex.bNonManifold)
+				{
+					CandidateDiagnostics.Issue = ETautTopologyIssue::NonManifold;
+					CandidateDiagnostics.Feature = Vertex.Id;
+					break;
+				}
+				if (Vertex.bOverValence)
+				{
+					CandidateDiagnostics.Issue = ETautTopologyIssue::OverValence;
+					CandidateDiagnostics.Feature = Vertex.Id;
+					break;
+				}
+			}
+		}
+
+		// A vertex landing in the strict interior of an unrelated convex edge is a
+		// T-junction. It has no unique incident-edge ordering, so the oriented
+		// corner predicates must reject it rather than guess.
+		if (CandidateDiagnostics.IsValid())
+		{
+			for (const FCollisionVertex& Vertex : CandidateVertices)
+			{
+				for (const FCollisionEdge& Edge : CandidateEdges)
+				{
+					if (Edge.Kind != ECollisionEdgeKind::Convex || Vertex.IncidentEdges.Contains(Edge.Id))
+					{
+						continue;
+					}
+					double Parameter = 0.0;
+					if (PointSegmentDistance(Vertex.Position, Edge.Start, Edge.End, Parameter) <= SafeTolerance
+						&& Parameter > SafeTolerance / FVector3d::Distance(Edge.Start, Edge.End)
+						&& Parameter < 1.0 - SafeTolerance / FVector3d::Distance(Edge.Start, Edge.End))
+					{
+						CandidateDiagnostics.Issue = ETautTopologyIssue::TJunction;
+						CandidateDiagnostics.Feature = Vertex.Id;
+						CandidateDiagnostics.OtherFeature = Edge.Id;
+						break;
+					}
+				}
+				if (!CandidateDiagnostics.IsValid())
+				{
+					break;
+				}
+			}
+		}
+
+		// Complete convex shapes may touch at faces/edges/points, but their interiors
+		// may not overlap. Face normals plus cross-products of unique edge directions
+		// form the full 3D convex separating-axis set, avoiding AABB false positives.
+		if (CandidateDiagnostics.IsValid())
+		{
+			TMap<FShapeKey, FConvexShapeData> Shapes;
+			for (const FCollisionTriangle& Triangle : CandidateTriangles)
+			{
+				const FShapeKey Key{Triangle.Id.ObjectToken, Triangle.Id.ShapeIndex};
+				FConvexShapeData& Shape = Shapes.FindOrAdd(Key);
+				Shape.Feature = Triangle.Id;
+				AddUniqueDirection(Shape.FaceNormals, Triangle.CalculateNormal());
+				for (int32 Corner = 0; Corner < 3; ++Corner)
+				{
+					Shape.Bounds += Triangle.Vertices[Corner];
+					AddUniquePosition(Shape.Positions, Triangle.Vertices[Corner], SafeTolerance);
+					AddUniqueDirection(
+						Shape.EdgeDirections,
+						Triangle.Vertices[(Corner + 1) % 3] - Triangle.Vertices[Corner]);
+				}
+			}
+			TArray<FShapeKey> Keys;
+			Shapes.GetKeys(Keys);
+			for (int32 A = 0; A < Keys.Num() && CandidateDiagnostics.IsValid(); ++A)
+			{
+				for (int32 B = A + 1; B < Keys.Num(); ++B)
+				{
+					if (ConvexShapesPenetrate(Shapes[Keys[A]], Shapes[Keys[B]], SafeTolerance))
+					{
+						CandidateDiagnostics.Issue = ETautTopologyIssue::OverlappingShapes;
+						CandidateDiagnostics.Feature = Shapes[Keys[A]].Feature;
+						CandidateDiagnostics.OtherFeature = Shapes[Keys[B]].Feature;
+						break;
+					}
+				}
+			}
+		}
+
+		Diagnostics = CandidateDiagnostics;
+		if (!Diagnostics.IsValid())
+		{
+			return false;
+		}
+		Triangles = MoveTemp(CandidateTriangles);
+		Edges = MoveTemp(CandidateEdges);
+		Vertices = MoveTemp(CandidateVertices);
+		Revision = CalculateTopologyRevision(Triangles, Edges, Vertices);
+		return true;
+	}
+
+	void FTautStaticTopology::Reset()
+	{
+		Triangles.Reset();
+		Edges.Reset();
+		Vertices.Reset();
+		Diagnostics = {};
+		Revision = 0;
+	}
+
+	FTautCollisionScene FTautStaticTopology::GetScene() const
+	{
+		return {Triangles, Edges, Vertices};
 	}
 }

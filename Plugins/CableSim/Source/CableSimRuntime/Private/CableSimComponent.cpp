@@ -93,6 +93,27 @@
 		}
 	}
 
+	ECableSimTautStatus ToRuntimeTopologyStatus(const CableSim::ETautTopologyIssue Issue)
+	{
+		switch (Issue)
+		{
+		case CableSim::ETautTopologyIssue::NonManifold:
+		case CableSim::ETautTopologyIssue::OpenBoundary:
+			return ECableSimTautStatus::NonManifoldTopology;
+		case CableSim::ETautTopologyIssue::OverValence:
+			return ECableSimTautStatus::TopologyOverValence;
+		case CableSim::ETautTopologyIssue::TJunction:
+			return ECableSimTautStatus::TJunctionTopology;
+		case CableSim::ETautTopologyIssue::OverlappingShapes:
+			return ECableSimTautStatus::OverlappingTopology;
+		case CableSim::ETautTopologyIssue::InvalidFeature:
+		case CableSim::ETautTopologyIssue::UnsupportedGeometry:
+			return ECableSimTautStatus::UnsupportedTopology;
+		default:
+			return ECableSimTautStatus::Ready;
+		}
+	}
+
 	FColor GetEdgeDebugColor(const CableSim::ECollisionEdgeKind Kind)
 	{
 		switch (Kind)
@@ -170,9 +191,7 @@ struct FCableSimRuntimeState
 	FCableSimChaosObjectTracker ChaosObjectTracker;
 	FCableSimChaosSnapshot ChaosSnapshot;
 	bool bSnapshotValid = false;
-	TArray<CableSim::FCollisionTriangle> SupportedTautTriangles;
-	TArray<CableSim::FCollisionEdge> SupportedTautEdges;
-	TArray<CableSim::FCollisionVertex> SupportedTautVertices;
+	CableSim::FTautStaticTopology StaticTautTopology;
 	FCableSimTautDiagnostics TautDiagnostics;
 	TArray<FVector3d> PreviousSolvedPositions;
 	TArray<FVector3d> CurrentSolvedPositions;
@@ -286,9 +305,7 @@ void UCableSimComponent::ReinitializeSimulation()
 	RuntimeState->TautSolver.Reset();
 	RuntimeState->ChaosObjectTracker.Reset();
 	RuntimeState->ChaosSnapshot.Reset();
-	RuntimeState->SupportedTautTriangles.Reset();
-	RuntimeState->SupportedTautEdges.Reset();
-	RuntimeState->SupportedTautVertices.Reset();
+	RuntimeState->StaticTautTopology.Reset();
 	RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
 	RuntimeState->bTautWasActive = TautSettings.Mode != ECableSimTautMode::Disabled;
 	RuntimeState->bHasLastAcceptedTautEndpoint[0] = false;
@@ -374,6 +391,16 @@ void UCableSimComponent::SetEndpointMode(
 	}
 	Binding.Mode = Mode;
 	RuntimeState->AppliedEndpointModes[EndpointIndex] = Mode;
+	FCableSimTautEndpointPolicy& Policy = Endpoint == ECableSimEndpoint::Start
+		? TautSettings.StartEndpoint : TautSettings.EndEndpoint;
+	if (Mode == ECableSimEndpointMode::Simulated)
+	{
+		Policy.Role = ECableSimTautEndpointRole::Free;
+	}
+	else if (Policy.Role == ECableSimTautEndpointRole::Free)
+	{
+		Policy.Role = ECableSimTautEndpointRole::Driven;
+	}
 }
 
 void UCableSimComponent::SetEndpointWorldTarget(
@@ -384,6 +411,12 @@ void UCableSimComponent::SetEndpointWorldTarget(
 	Binding.Mode = ECableSimEndpointMode::WorldKinematic;
 	Binding.WorldTarget = WorldPosition;
 	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
+	FCableSimTautEndpointPolicy& Policy = Endpoint == ECableSimEndpoint::Start
+		? TautSettings.StartEndpoint : TautSettings.EndEndpoint;
+	if (Policy.Role == ECableSimTautEndpointRole::Free)
+	{
+		Policy.Role = ECableSimTautEndpointRole::Driven;
+	}
 }
 
 void UCableSimComponent::SetEndpointLocalTarget(
@@ -394,6 +427,12 @@ void UCableSimComponent::SetEndpointLocalTarget(
 	Binding.Mode = ECableSimEndpointMode::CableLocalKinematic;
 	Binding.LocalTarget = LocalPosition;
 	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
+	FCableSimTautEndpointPolicy& Policy = Endpoint == ECableSimEndpoint::Start
+		? TautSettings.StartEndpoint : TautSettings.EndEndpoint;
+	if (Policy.Role == ECableSimTautEndpointRole::Free)
+	{
+		Policy.Role = ECableSimTautEndpointRole::Driven;
+	}
 }
 
 void UCableSimComponent::AttachEndpointToComponent(
@@ -408,6 +447,12 @@ void UCableSimComponent::AttachEndpointToComponent(
 	Binding.SocketName = SocketName;
 	Binding.ComponentLocalOffset = LocalOffset;
 	RuntimeState->AppliedEndpointModes[Endpoint == ECableSimEndpoint::Start ? 0 : 1] = Binding.Mode;
+	FCableSimTautEndpointPolicy& Policy = Endpoint == ECableSimEndpoint::Start
+		? TautSettings.StartEndpoint : TautSettings.EndEndpoint;
+	if (Policy.Role == ECableSimTautEndpointRole::Free)
+	{
+		Policy.Role = ECableSimTautEndpointRole::Driven;
+	}
 }
 
 void UCableSimComponent::ReleaseEndpoint(
@@ -816,29 +861,35 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			RuntimeState->TautSolver.Reset();
 			RuntimeState->ChaosObjectTracker.Reset();
 			RuntimeState->ChaosSnapshot.Reset();
-			RuntimeState->SupportedTautTriangles.Reset();
-			RuntimeState->SupportedTautEdges.Reset();
-			RuntimeState->SupportedTautVertices.Reset();
+			RuntimeState->StaticTautTopology.Reset();
 		}
 		RuntimeState->bTautWasActive = false;
 		RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
 		return;
 	}
-	const int32 ConstrainedEndpointIndex = TautSettings.ConstrainedEndpoint == ECableSimEndpoint::Start
-		? 0 : 1;
-	auto FreezeConstrainedEndpoint = [this, &Input, ConstrainedEndpointIndex]()
+	const FCableSimTautEndpointPolicy* EndpointPolicies[2] = {
+		&TautSettings.StartEndpoint,
+		&TautSettings.EndEndpoint};
+	auto FreezeDrivenEndpoints = [this, &Input, &EndpointPolicies]()
 	{
 		if (TautSettings.Mode != ECableSimTautMode::Enabled || Solver.GetParticles().Num() < 2)
 		{
 			return;
 		}
-		CableSim::FEndpointStepInput& EndpointInput = ConstrainedEndpointIndex == 0
-			? Input.StartEndpoint : Input.EndEndpoint;
-		EndpointInput.TargetPosition = RuntimeState->bHasLastAcceptedTautEndpoint[ConstrainedEndpointIndex]
-			? RuntimeState->LastAcceptedTautEndpoints[ConstrainedEndpointIndex]
-			: (ConstrainedEndpointIndex == 0
-				? Solver.GetParticles()[0].Position : Solver.GetParticles().Last().Position);
-		EndpointInput.TargetVelocity = FVector3d::ZeroVector;
+		for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
+		{
+			if (EndpointPolicies[EndpointIndex]->Role != ECableSimTautEndpointRole::Driven)
+			{
+				continue;
+			}
+			CableSim::FEndpointStepInput& EndpointInput = EndpointIndex == 0
+				? Input.StartEndpoint : Input.EndEndpoint;
+			EndpointInput.TargetPosition = RuntimeState->bHasLastAcceptedTautEndpoint[EndpointIndex]
+				? RuntimeState->LastAcceptedTautEndpoints[EndpointIndex]
+				: (EndpointIndex == 0
+					? Solver.GetParticles()[0].Position : Solver.GetParticles().Last().Position);
+			EndpointInput.TargetVelocity = FVector3d::ZeroVector;
+		}
 	};
 
 	FCableSimTautDiagnostics Diagnostics;
@@ -855,14 +906,11 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 	Diagnostics.OverValenceVertexCount = SnapshotDiagnostics.OverValenceVertexCount;
 	Diagnostics.SnapshotMilliseconds = SnapshotDiagnostics.SnapshotMilliseconds;
 	Diagnostics.TopologyCompileMilliseconds = SnapshotDiagnostics.CompileMilliseconds;
-	RuntimeState->SupportedTautTriangles.Reset();
-	RuntimeState->SupportedTautEdges.Reset();
-	RuntimeState->SupportedTautVertices.Reset();
 	if (!bSnapshotSucceeded)
 	{
 		Diagnostics.Status = ECableSimTautStatus::SnapshotFailed;
 		RuntimeState->TautDiagnostics = Diagnostics;
-		FreezeConstrainedEndpoint();
+		FreezeDrivenEndpoints();
 		return;
 	}
 
@@ -872,32 +920,36 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			&& (GeometryType == CableSim::ECollisionGeometryType::Box
 				|| GeometryType == CableSim::ECollisionGeometryType::Convex);
 	};
+	TArray<CableSim::FCollisionTriangle> SupportedTriangles;
 	for (const CableSim::FCollisionTriangle& Triangle : RuntimeState->ChaosSnapshot.Triangles)
 	{
 		if (IsSupported(Triangle.GeometryType, Triangle.bStaticObject))
 		{
-			RuntimeState->SupportedTautTriangles.Add(Triangle);
+			SupportedTriangles.Add(Triangle);
 		}
 	}
-	for (const CableSim::FCollisionEdge& Edge : RuntimeState->ChaosSnapshot.Edges)
+	CableSim::FTautStaticTopology CandidateTopology;
+	const double TopologyBuildStart = FPlatformTime::Seconds();
+	const bool bTopologyValid = CandidateTopology.Build(
+		SupportedTriangles,
+		FMath::Max(TautSettings.TopologyTolerance, 0.001),
+		8);
+	Diagnostics.TopologyCompileMilliseconds +=
+		(FPlatformTime::Seconds() - TopologyBuildStart) * 1000.0;
+	if (!bTopologyValid)
 	{
-		if (IsSupported(Edge.GeometryType, Edge.bStaticObject))
-		{
-			RuntimeState->SupportedTautEdges.Add(Edge);
-		}
+		Diagnostics.Status = ToRuntimeTopologyStatus(CandidateTopology.GetDiagnostics().Issue);
+		RuntimeState->TautDiagnostics = Diagnostics;
+		FreezeDrivenEndpoints();
+		return;
 	}
-	for (const CableSim::FCollisionVertex& Vertex : RuntimeState->ChaosSnapshot.Vertices)
+	if (CandidateTopology.GetRevision() != RuntimeState->StaticTautTopology.GetRevision())
 	{
-		if (IsSupported(Vertex.GeometryType, Vertex.bStaticObject))
-		{
-			RuntimeState->SupportedTautVertices.Add(Vertex);
-		}
+		RuntimeState->StaticTautTopology = MoveTemp(CandidateTopology);
 	}
-	Diagnostics.SupportedEdgeCount = RuntimeState->SupportedTautEdges.Num();
-	const CableSim::FTautCollisionScene Scene{
-		RuntimeState->SupportedTautTriangles,
-		RuntimeState->SupportedTautEdges,
-		RuntimeState->SupportedTautVertices};
+	Diagnostics.SupportedEdgeCount = RuntimeState->StaticTautTopology.GetEdges().Num();
+	Diagnostics.TopologyRevision = static_cast<int64>(RuntimeState->StaticTautTopology.GetRevision());
+	const CableSim::FTautCollisionScene Scene = RuntimeState->StaticTautTopology.GetScene();
 
 	CableSim::FTautConfig TautConfig;
 	TautConfig.TopologyTolerance = FMath::Max(TautSettings.TopologyTolerance, 0.001);
@@ -917,7 +969,31 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			1.e-9)
 		|| TautConfig.MaximumMovementIterations != RuntimeState->AppliedTautConfig.MaximumMovementIterations
 		|| TautConfig.MaximumCollisionPhases != RuntimeState->AppliedTautConfig.MaximumCollisionPhases;
-	if (!RuntimeState->bTautWasActive || !RuntimeState->TautSolver.IsInitialized() || bConfigChanged)
+	auto SceneContains = [&Scene](const CableSim::FTautPoint& Point)
+	{
+		if (Point.Type == CableSim::ETautPointType::Endpoint)
+		{
+			return true;
+		}
+		if (Point.Type == CableSim::ETautPointType::EdgeContact)
+		{
+			return Scene.Edges.ContainsByPredicate([&Point](const CableSim::FCollisionEdge& Edge)
+			{
+				return Edge.Id == Point.FeatureId;
+			});
+		}
+		return Scene.Vertices.ContainsByPredicate([&Point](const CableSim::FCollisionVertex& Vertex)
+		{
+			return Vertex.Id == Point.FeatureId;
+		});
+	};
+	const bool bActiveFeatureMissing = RuntimeState->TautSolver.GetPoints().ContainsByPredicate(
+		[&SceneContains](const CableSim::FTautPoint& Point)
+		{
+			return !SceneContains(Point);
+		});
+	if (!RuntimeState->bTautWasActive || !RuntimeState->TautSolver.IsInitialized()
+		|| bConfigChanged || bActiveFeatureMissing)
 	{
 		TArray<FVector3d, TInlineAllocator<128>> SeedPolyline;
 		for (const CableSim::FParticle& Particle : Solver.GetParticles())
@@ -931,16 +1007,27 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			Diagnostics.bPathCollisionFree = Result.bPathCollisionFree;
 			RuntimeState->TautDiagnostics = Diagnostics;
 			RuntimeState->bTautWasActive = true;
-			FreezeConstrainedEndpoint();
+			FreezeDrivenEndpoints();
 			return;
 		}
 		RuntimeState->AppliedTautConfig = TautConfig;
 	}
 	RuntimeState->bTautWasActive = true;
 
+	const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
+	const FVector3d CurrentEndpoints[2] = {
+		Particles[0].Position,
+		Particles.Last().Position};
 	CableSim::FTautStepInput TautInput;
-	TautInput.StartTarget = Input.StartEndpoint.TargetPosition;
-	TautInput.EndTarget = Input.EndEndpoint.TargetPosition;
+	TautInput.StartTarget = EndpointPolicies[0]->Role == ECableSimTautEndpointRole::Free
+		? CurrentEndpoints[0] : Input.StartEndpoint.TargetPosition;
+	TautInput.EndTarget = EndpointPolicies[1]->Role == ECableSimTautEndpointRole::Free
+		? CurrentEndpoints[1] : Input.EndEndpoint.TargetPosition;
+	TautInput.PreferredPolyline.Reserve(Particles.Num());
+	for (const CableSim::FParticle& Particle : Particles)
+	{
+		TautInput.PreferredPolyline.Add(Particle.Position);
+	}
 	const double SolverStart = FPlatformTime::Seconds();
 	const CableSim::FTautStateSnapshot InitialState = RuntimeState->TautSolver.CaptureState();
 	CableSim::FTautStepResult Result = RuntimeState->TautSolver.AdvanceStep(TautInput, Scene);
@@ -956,52 +1043,65 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 	bool bAccepted = IsAccepted(Result);
 	if (TautSettings.Mode == ECableSimTautMode::Enabled && !bAccepted)
 	{
-		// Solve every reach probe from the exact same state. This makes the
-		// selected endpoint target deterministic and prevents failed probes from
-		// contaminating later probes with contacts from a different path.
-		const TArray<CableSim::FParticle>& Particles = Solver.GetParticles();
-		const int32 EndpointIndex = TautSettings.ConstrainedEndpoint == ECableSimEndpoint::Start ? 0 : 1;
-		const FVector3d CurrentTarget = EndpointIndex == 0
-			? Particles[0].Position : Particles.Last().Position;
-		const FVector3d RequestedTarget = EndpointIndex == 0
-			? TautInput.StartTarget : TautInput.EndTarget;
-		// Probe along the requested direction over a bounded span, not all the way to a
-		// far overextended target. Capping the span at the rope length keeps the reach
-		// boundary resolved finely (span/2^iterations), so an overextended endpoint tracks
-		// the boundary continuously instead of landing coarsely and freezing. When the
-		// request is within reach this span equals the requested distance -- identical to
-		// a straight Lerp to the target.
-		const FVector3d ToRequested = RequestedTarget - CurrentTarget;
-		const double RequestedDistance = ToRequested.Length();
-		const FVector3d ReachDirection = RequestedDistance > UE_KINDA_SMALL_NUMBER
-			? ToRequested / RequestedDistance : FVector3d::ZeroVector;
-		const double ProbeSpan = FMath::Min(
-			RequestedDistance, FMath::Max(SimulationSettings.RestLength, 0.0));
-		auto CandidateAt = [&](const double Alpha)
+		// Project all Driven endpoints together. Equal weights produce symmetric
+		// motion. A higher weight reaches its requested target earlier on the search
+		// path, preserving more of that driver's request at the reach boundary.
+		FVector3d RequestedEndpoints[2] = {TautInput.StartTarget, TautInput.EndTarget};
+		FVector3d BoundedEndpoints[2] = {RequestedEndpoints[0], RequestedEndpoints[1]};
+		double MinimumDrivenWeight = TNumericLimits<double>::Max();
+		int32 DrivenCount = 0;
+		for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
 		{
-			return CurrentTarget + ReachDirection * (Alpha * ProbeSpan);
+			if (EndpointPolicies[EndpointIndex]->Role != ECableSimTautEndpointRole::Driven)
+			{
+				continue;
+			}
+			++DrivenCount;
+			MinimumDrivenWeight = FMath::Min(
+				MinimumDrivenWeight,
+				FMath::Max(EndpointPolicies[EndpointIndex]->ReachWeight, 0.001));
+			const FVector3d Delta = RequestedEndpoints[EndpointIndex] - CurrentEndpoints[EndpointIndex];
+			const double Distance = Delta.Length();
+			const double Span = FMath::Min(Distance, FMath::Max(SimulationSettings.RestLength, 0.0));
+			BoundedEndpoints[EndpointIndex] = Distance > UE_KINDA_SMALL_NUMBER
+				? CurrentEndpoints[EndpointIndex] + Delta * (Span / Distance)
+				: CurrentEndpoints[EndpointIndex];
+		}
+
+		auto ProgressAt = [&](const int32 EndpointIndex, const double SearchCoordinate)
+		{
+			if (EndpointPolicies[EndpointIndex]->Role != ECableSimTautEndpointRole::Driven)
+			{
+				return 1.0;
+			}
+			const double Weight = FMath::Max(EndpointPolicies[EndpointIndex]->ReachWeight, 0.001);
+			return FMath::Clamp(SearchCoordinate * Weight / MinimumDrivenWeight, 0.0, 1.0);
 		};
-		double AcceptedAlpha = 0.0;
+		auto CandidateAt = [&](const int32 EndpointIndex, const double SearchCoordinate)
+		{
+			if (EndpointPolicies[EndpointIndex]->Role == ECableSimTautEndpointRole::Driven)
+			{
+				return FMath::Lerp(
+					CurrentEndpoints[EndpointIndex],
+					BoundedEndpoints[EndpointIndex],
+					ProgressAt(EndpointIndex, SearchCoordinate));
+			}
+			return RequestedEndpoints[EndpointIndex];
+		};
+		double AcceptedCoordinate = 0.0;
 		CableSim::FTautStateSnapshot AcceptedState;
 		bool bHasAcceptedProbe = false;
 
-		auto Probe = [&](const double Alpha)
+		auto Probe = [&](const double SearchCoordinate)
 		{
 			RuntimeState->TautSolver.RestoreState(InitialState);
 			CableSim::FTautStepInput ProbeInput = TautInput;
-			const FVector3d CandidateTarget = CandidateAt(Alpha);
-			if (EndpointIndex == 0)
-			{
-				ProbeInput.StartTarget = CandidateTarget;
-			}
-			else
-			{
-				ProbeInput.EndTarget = CandidateTarget;
-			}
+			ProbeInput.StartTarget = CandidateAt(0, SearchCoordinate);
+			ProbeInput.EndTarget = CandidateAt(1, SearchCoordinate);
 			const CableSim::FTautStepResult ProbeResult = RuntimeState->TautSolver.AdvanceStep(ProbeInput, Scene);
 			if (IsAccepted(ProbeResult))
 			{
-				AcceptedAlpha = Alpha;
+				AcceptedCoordinate = SearchCoordinate;
 				AcceptedState = RuntimeState->TautSolver.CaptureState();
 				Result = ProbeResult;
 				return true;
@@ -1009,7 +1109,7 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 			return false;
 		};
 
-		bHasAcceptedProbe = Probe(0.0);
+		bHasAcceptedProbe = DrivenCount > 0 && Probe(0.0);
 		if (bHasAcceptedProbe)
 		{
 			double Lower = 0.0;
@@ -1028,22 +1128,32 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 					Upper = Middle;
 				}
 			}
+			// Re-evaluate the chosen coordinate last so the one-frame pair-decision
+			// trace describes the state we publish, not the final rejected bisection probe.
+			Probe(AcceptedCoordinate);
 			RuntimeState->TautSolver.RestoreState(AcceptedState);
-			CableSim::FEndpointStepInput& ConstrainedInput = EndpointIndex == 0
-				? Input.StartEndpoint : Input.EndEndpoint;
-			ConstrainedInput.TargetPosition = CandidateAt(AcceptedAlpha);
-			ConstrainedInput.TargetVelocity *= AcceptedAlpha;
+			for (int32 EndpointIndex = 0; EndpointIndex < 2; ++EndpointIndex)
+			{
+				if (EndpointPolicies[EndpointIndex]->Role != ECableSimTautEndpointRole::Driven)
+				{
+					continue;
+				}
+				CableSim::FEndpointStepInput& EndpointInput = EndpointIndex == 0
+					? Input.StartEndpoint : Input.EndEndpoint;
+				const double Progress = ProgressAt(EndpointIndex, AcceptedCoordinate);
+				EndpointInput.TargetPosition = CandidateAt(EndpointIndex, AcceptedCoordinate);
+				EndpointInput.TargetVelocity *= Progress;
+			}
 			bAccepted = true;
 		}
 		else
 		{
 			RuntimeState->TautSolver.RestoreState(InitialState);
-			CableSim::FEndpointStepInput& ConstrainedInput = EndpointIndex == 0
-				? Input.StartEndpoint : Input.EndEndpoint;
-			ConstrainedInput.TargetPosition = RuntimeState->bHasLastAcceptedTautEndpoint[EndpointIndex]
-				? RuntimeState->LastAcceptedTautEndpoints[EndpointIndex]
-				: CurrentTarget;
-			ConstrainedInput.TargetVelocity = FVector3d::ZeroVector;
+			FreezeDrivenEndpoints();
+			// Diagnostics and rendering must describe the state we actually kept,
+			// not the rejected probe that caused us to fall back. In particular this
+			// preserves visible/history topology during a conservative singular hold.
+			Result = RuntimeState->TautSolver.GetLastResult();
 		}
 	}
 
@@ -1054,10 +1164,16 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 		RuntimeState->LastAcceptedTautEndpoints[1] = Points.Last().Position;
 		RuntimeState->bHasLastAcceptedTautEndpoint[0] = true;
 		RuntimeState->bHasLastAcceptedTautEndpoint[1] = true;
-		if (TautSettings.Mode == ECableSimTautMode::Enabled)
-		{
-			BuildTautGuideConstraints(Input);
-		}
+	}
+	const bool bHeldPathUsable = (Result.Status == CableSim::ETautStatus::Ready
+			|| Result.Status == CableSim::ETautStatus::NoRelevantGeometry)
+		&& Result.bPathCollisionFree;
+	if (TautSettings.Mode == ECableSimTautMode::Enabled && bHeldPathUsable)
+	{
+		// A conservative reach/topology fallback still owns a valid visible path.
+		// Keep its corridor active for that frame so the dynamic rope does not pop
+		// free merely because a requested endpoint target was rejected.
+		BuildTautGuideConstraints(Input);
 	}
 	Diagnostics.SolverMilliseconds = (FPlatformTime::Seconds() - SolverStart) * 1000.0;
 	Diagnostics.Status = ToRuntimeTautStatus(Result.Status);
@@ -1067,6 +1183,7 @@ void UCableSimComponent::PerformTautStep(CableSim::FStepInput& Input)
 	Diagnostics.MovementIterationCount = Result.MovementIterationCount;
 	Diagnostics.CollisionPhaseCount = Result.CollisionPhaseCount;
 	Diagnostics.TopologyEventCount = Result.TopologyEventCount;
+	Diagnostics.PairDecisionCount = RuntimeState->TautSolver.GetLastPairDecisions().Num();
 	Diagnostics.PathLength = Result.PathLength;
 	Diagnostics.bPathCollisionFree = Result.bPathCollisionFree;
 	RuntimeState->TautDiagnostics = Diagnostics;
@@ -1230,6 +1347,7 @@ void UCableSimComponent::RefreshEditorPreview()
 	RuntimeState->RenderInterpolationAlpha = 1.0;
 	RuntimeState->TautSolver.Reset();
 	RuntimeState->ChaosSnapshot.Reset();
+	RuntimeState->StaticTautTopology.Reset();
 	RuntimeState->TautDiagnostics = FCableSimTautDiagnostics{};
 	RuntimeState->bTautWasActive = false;
 	if (TautSettings.Mode == ECableSimTautMode::Disabled)
@@ -1438,6 +1556,38 @@ FDebugRenderSceneProxy* UCableSimComponent::CreateDebugSceneProxy()
 				? SurfaceOrange : GetEdgeDebugColor(Edge.Kind);
 			Proxy->Lines.Emplace(FVector(Edge.Start), FVector(Edge.End), EdgeColor, Thickness);
 		}
+		auto DecisionColor = [](const CableSim::ETautPairAction Action)
+		{
+			switch (Action)
+			{
+			case CableSim::ETautPairAction::StableInner:
+				return FColor(76, 195, 138);
+			case CableSim::ETautPairAction::MoveAlongA:
+			case CableSim::ETautPairAction::MoveAlongB:
+				return FColor(0, 220, 255);
+			case CableSim::ETautPairAction::ChooseAOrB:
+				return FColor(142, 124, 195);
+			case CableSim::ETautPairAction::IgnoreA:
+			case CableSim::ETautPairAction::IgnoreB:
+				return FColor(128, 128, 128);
+			case CableSim::ETautPairAction::OuterAThenB:
+			case CableSim::ETautPairAction::OuterBThenA:
+				return FColor(255, 128, 0);
+			default:
+				return FColor(255, 0, 255);
+			}
+		};
+		for (const CableSim::FTautPairDecision& Decision : RuntimeState->TautSolver.GetLastPairDecisions())
+		{
+			for (const CableSim::FCollisionEdge& Edge : RuntimeState->StaticTautTopology.GetEdges())
+			{
+				if (Edge.Id == Decision.EdgeA || Edge.Id == Decision.EdgeB)
+				{
+					Proxy->Lines.Emplace(
+						FVector(Edge.Start), FVector(Edge.End), DecisionColor(Decision.Action), Thickness + 2.0f);
+				}
+			}
+		}
 	}
 
 	const TArray<CableSim::FTautPoint>& TautPoints = RuntimeState->TautSolver.GetPoints();
@@ -1498,6 +1648,9 @@ FDebugRenderSceneProxy* UCableSimComponent::CreateDebugSceneProxy()
 					static_cast<int64>(RuntimeState->TautDiagnostics.Status)),
 				RuntimeState->TautDiagnostics.ContactCount, TautMilliseconds),
 				RuntimeState->TautDiagnostics.Status == ECableSimTautStatus::Ready ? Ok : Warn);
+			Line(5, FString::Printf(TEXT("topology rev %lld  pair decisions %d"),
+				RuntimeState->TautDiagnostics.TopologyRevision,
+				RuntimeState->TautDiagnostics.PairDecisionCount), NormalWhite);
 		}
 	}
 	return Proxy;

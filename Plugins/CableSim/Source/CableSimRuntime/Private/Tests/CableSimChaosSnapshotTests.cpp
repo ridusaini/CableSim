@@ -851,7 +851,8 @@ bool FCableSimTautOverextensionHomotopyTest::RunTest(const FString& Parameters)
 	Cable->CollisionSettings.bEnableWorldCollision = true;
 	Cable->CollisionSettings.Radius = 2.5;
 	Cable->TautSettings.Mode = ECableSimTautMode::Enabled;
-	Cable->TautSettings.ConstrainedEndpoint = ECableSimEndpoint::End;
+	Cable->TautSettings.StartEndpoint.Role = ECableSimTautEndpointRole::Fixed;
+	Cable->TautSettings.EndEndpoint.Role = ECableSimTautEndpointRole::Driven;
 	Cable->StartEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
 	Cable->EndEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
 	const FVector WrapStart(-60.0, -65.0, 10.0);
@@ -933,7 +934,8 @@ bool FCableSimTautEnabledClampsReachTest::RunTest(const FString& Parameters)
 	Cable->SimulationSettings.Gravity = FVector::ZeroVector;
 	Cable->CollisionSettings.bEnableWorldCollision = false;
 	Cable->TautSettings.Mode = ECableSimTautMode::Enabled;
-	Cable->TautSettings.ConstrainedEndpoint = ECableSimEndpoint::End;
+	Cable->TautSettings.StartEndpoint.Role = ECableSimTautEndpointRole::Fixed;
+	Cable->TautSettings.EndEndpoint.Role = ECableSimTautEndpointRole::Driven;
 	Cable->StartEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
 	Cable->EndEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
 	const FVector FarOrigin(100000.0, 0.0, 10000.0);
@@ -954,6 +956,79 @@ bool FCableSimTautEnabledClampsReachTest::RunTest(const FString& Parameters)
 
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautBothDrivenWeightedReachTest,
+	"CableSim.Runtime.Taut.BothDrivenWeightedReach",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautBothDrivenWeightedReachTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GIsEditor ? GWorld : (GEngine ? GEngine->GetWorldContexts()[0].World() : nullptr);
+	if (!TestNotNull(TEXT("Editor world is available"), World))
+	{
+		return false;
+	}
+	auto RunCase = [World](const double StartWeight, const double EndWeight)
+	{
+		AActor* Owner = World->SpawnActor<AActor>();
+		UCableSimComponent* Cable = NewObject<UCableSimComponent>(Owner);
+		Cable->SimulationSettings.RestLength = 100.0;
+		Cable->SimulationSettings.NodeSpacing = 10.0;
+		Cable->SimulationSettings.Gravity = FVector::ZeroVector;
+		Cable->CollisionSettings.bEnableWorldCollision = false;
+		Cable->TautSettings.Mode = ECableSimTautMode::Enabled;
+		Cable->TautSettings.StartEndpoint.Role = ECableSimTautEndpointRole::Driven;
+		Cable->TautSettings.StartEndpoint.ReachWeight = StartWeight;
+		Cable->TautSettings.EndEndpoint.Role = ECableSimTautEndpointRole::Driven;
+		Cable->TautSettings.EndEndpoint.ReachWeight = EndWeight;
+		Cable->StartEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
+		Cable->EndEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
+		const FVector Origin(200000.0, 0.0, 20000.0);
+		Cable->StartEndpoint.WorldTarget = Origin;
+		Cable->EndEndpoint.WorldTarget = Origin + FVector(50.0, 0.0, 0.0);
+		Cable->RegisterComponent();
+		Cable->ReinitializeSimulation();
+		Cable->StepSimulation(1);
+		Cable->StartEndpoint.WorldTarget = Origin - FVector(100.0, 0.0, 0.0);
+		Cable->EndEndpoint.WorldTarget = Origin + FVector(150.0, 0.0, 0.0);
+		Cable->StepSimulation(1);
+		const TArray<FVector> Polyline = Cable->GetRenderPolyline();
+		const FVector2d Movement(
+			Origin.X - Polyline[0].X,
+			Polyline.Last().X - (Origin.X + 50.0));
+		Cable->DestroyComponent();
+		Owner->Destroy();
+		return Movement;
+	};
+
+	const FVector2d EqualMovement = RunCase(1.0, 1.0);
+	TestTrue(TEXT("Equal endpoint weights share an overextension correction"),
+		EqualMovement.X > 20.0 && EqualMovement.Y > 20.0
+		&& FMath::Abs(EqualMovement.X - EqualMovement.Y) < 2.0);
+	const FVector2d StartPriorityMovement = RunCase(10.0, 1.0);
+	TestTrue(TEXT("A higher start weight preserves more of the start request"),
+		StartPriorityMovement.X > 4.0 * StartPriorityMovement.Y);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautEndpointLifecycleTest,
+	"CableSim.Runtime.Taut.EndpointPickupReleaseLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautEndpointLifecycleTest::RunTest(const FString& Parameters)
+{
+	UCableSimComponent* Cable = NewObject<UCableSimComponent>();
+	Cable->TautSettings.EndEndpoint.Role = ECableSimTautEndpointRole::Driven;
+	Cable->ReleaseEndpoint(ECableSimEndpoint::End, false);
+	TestEqual(TEXT("A released endpoint becomes free in the taut solve"),
+		Cable->TautSettings.EndEndpoint.Role, ECableSimTautEndpointRole::Free);
+	Cable->AttachEndpointToComponent(ECableSimEndpoint::End, nullptr);
+	TestEqual(TEXT("Picking a free endpoint up makes it a driven taut endpoint"),
+		Cable->TautSettings.EndEndpoint.Role, ECableSimTautEndpointRole::Driven);
 	return true;
 }
 

@@ -106,6 +106,28 @@ namespace CableSim
 		int32 OverValenceVertexCount = 0;
 	};
 
+	enum class ETautTopologyIssue : uint8
+	{
+		None,
+		InvalidFeature,
+		UnsupportedGeometry,
+		OpenBoundary,
+		NonManifold,
+		OverValence,
+		TJunction,
+		OverlappingShapes
+	};
+
+	struct CABLESIMCORE_API FTautTopologyDiagnostics
+	{
+		ETautTopologyIssue Issue = ETautTopologyIssue::None;
+		FCollisionFeatureId Feature;
+		FCollisionFeatureId OtherFeature;
+		FTopologyCompileDiagnostics Compile;
+
+		bool IsValid() const { return Issue == ETautTopologyIssue::None; }
+	};
+
 	class CABLESIMCORE_API FCollisionTopologyCompiler
 	{
 	public:
@@ -119,5 +141,54 @@ namespace CableSim
 			int32 MaximumIncidentEdges,
 			TArray<FCollisionEdge>& OutEdges,
 			TArray<FCollisionVertex>& OutVertices);
+	};
+
+	struct FTautCollisionScene;
+
+	/**
+	 * Common immutable-scene contract used by the taut solver. Providers own the
+	 * backing storage and retain it for at least the duration of a solve.
+	 */
+	class CABLESIMCORE_API ITautTopologyProvider
+	{
+	public:
+		virtual ~ITautTopologyProvider() = default;
+		virtual FTautCollisionScene GetScene() const = 0;
+		virtual uint64 GetRevision() const = 0;
+		virtual const FTautTopologyDiagnostics& GetDiagnostics() const = 0;
+	};
+
+	/**
+	 * Owned adapter for authored or extracted static Box/Convex triangles. Build
+	 * validates the complete shape topology once; the published scene is then
+	 * immutable until the next successful Build call.
+	 */
+	class CABLESIMCORE_API FTautStaticTopology final : public ITautTopologyProvider
+	{
+	public:
+		bool Build(
+			TConstArrayView<FCollisionTriangle> InTriangles,
+			double Tolerance,
+			int32 MaximumIncidentEdges = 8);
+		void Reset();
+
+		virtual FTautCollisionScene GetScene() const override;
+		virtual uint64 GetRevision() const override { return Revision; }
+		virtual const FTautTopologyDiagnostics& GetDiagnostics() const override
+		{
+			return Diagnostics;
+		}
+
+		bool IsValid() const { return Diagnostics.IsValid(); }
+		const TArray<FCollisionTriangle>& GetTriangles() const { return Triangles; }
+		const TArray<FCollisionEdge>& GetEdges() const { return Edges; }
+		const TArray<FCollisionVertex>& GetVertices() const { return Vertices; }
+
+	private:
+		TArray<FCollisionTriangle> Triangles;
+		TArray<FCollisionEdge> Edges;
+		TArray<FCollisionVertex> Vertices;
+		FTautTopologyDiagnostics Diagnostics;
+		uint64 Revision = 0;
 	};
 }
