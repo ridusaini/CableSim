@@ -506,6 +506,37 @@ bool FCableSimTautWrapsRealChaosGeometryTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Wrapped path is longer than the blocked straight-line distance"),
 		Diagnostics.PathLength > BlockedStraightLineDistance + 1.0);
 
+	// Bring End around to Start's side of the same real box. The final chord is
+	// clear and the endpoint remains within reach, so every old edge/vertex
+	// contact must be forgotten rather than retained as topology history.
+	const FVector3d UnwrapEnd(-60.0, 55.0, 10.0);
+	Cable->EndEndpoint.WorldTarget = FVector(UnwrapEnd);
+	for (int32 Step = 0; Step < 8; ++Step)
+	{
+		Cable->StepSimulation(1);
+	}
+	const FCableSimTautDiagnostics UnwrappedDiagnostics = Cable->GetTautDiagnostics();
+	const TArray<FVector> UnwrappedPolyline = Cable->GetTautPolyline();
+	AddInfo(FString::Printf(
+		TEXT("After real-box unwrap: status=%d contacts=%d points=%d pathLength=%.1f releases=%d holds=%d/%d/%d moves=%d"),
+		static_cast<int32>(UnwrappedDiagnostics.Status), UnwrappedDiagnostics.ContactCount,
+		UnwrappedPolyline.Num(), UnwrappedDiagnostics.PathLength,
+		UnwrappedDiagnostics.VertexReleaseCount, UnwrappedDiagnostics.StableVertexHoldCount,
+		UnwrappedDiagnostics.SingularVertexHoldCount, UnwrappedDiagnostics.ConflictVertexHoldCount,
+		UnwrappedDiagnostics.VertexMoveAlongCount));
+	for (int32 Index = 0; Index < UnwrappedPolyline.Num(); ++Index)
+	{
+		AddInfo(FString::Printf(TEXT("  unwrapped point %d: %s"),
+			Index, *UnwrappedPolyline[Index].ToString()));
+	}
+	TestTrue(TEXT("The real-box unwrap remains in a valid taut state"),
+		UnwrappedDiagnostics.Status == ECableSimTautStatus::Ready
+		|| UnwrappedDiagnostics.Status == ECableSimTautStatus::NoRelevantGeometry);
+	TestEqual(TEXT("The real-box unwrap forgets every obsolete contact"),
+		UnwrappedDiagnostics.ContactCount, 0);
+	TestEqual(TEXT("The unwrapped taut path is the direct endpoint segment"),
+		UnwrappedPolyline.Num(), 2);
+
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
 	CubeActor->Destroy();
@@ -811,15 +842,15 @@ bool FCableSimTautRecoversAfterContactAgesOutOfRangeTest::RunTest(const FString&
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCableSimTautOverextensionHomotopyTest,
-	"CableSim.Runtime.Taut.OverextensionKeepsHomotopy",
+	"CableSim.Runtime.Taut.OverextensionProcessesTopologyEvents",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FCableSimTautOverextensionHomotopyTest::RunTest(const FString& Parameters)
 {
-	// Wind a wrapped cable the long way around a real box corner, then over-extend it.
-	// The taut path must not teleport across the box to a shorter direct line while the
-	// rope is wound: a wrap may only leave continuously (contacts fall one at a time),
-	// never a multi-contact collapse to the straight endpoint distance in a single step.
+	// Wind a cable around a real box, tighten its reach budget, and continue the
+	// endpoint motion until the live face support disappears. Multiple obsolete
+	// contacts may release in one solver step, but only if the published result is
+	// the valid direct path and remains inside the reach limit.
 	UWorld* World = GIsEditor ? GWorld : (GEngine ? GEngine->GetWorldContexts()[0].World() : nullptr);
 	if (!TestNotNull(TEXT("Editor world is available"), World))
 	{
@@ -872,7 +903,7 @@ bool FCableSimTautOverextensionHomotopyTest::RunTest(const FString& Parameters)
 	// then bring it back toward Start's (clear, direct) side. Once wound, shrink the
 	// rest length so the wound path is over-extended; a clear short direct chord then
 	// tempts reach to drop the wrap.
-	int32 AbruptDrop = 0;
+	int32 DirectReleaseCascadeCount = 0;
 	int32 MaxContacts = 0;
 	int32 PreviousContacts = Cable->GetTautDiagnostics().ContactCount;
 	const double Radius = 78.0;
@@ -893,21 +924,31 @@ bool FCableSimTautOverextensionHomotopyTest::RunTest(const FString& Parameters)
 		const TArray<FVector> Poly = Cable->GetTautPolyline();
 		const double StraightDist = Poly.Num() >= 2 ? FVector::Distance(Poly[0], Poly.Last()) : 0.0;
 		MaxContacts = FMath::Max(MaxContacts, D.ContactCount);
-		if (PreviousContacts >= 2 && D.ContactCount <= PreviousContacts - 2 && D.SupportedEdgeCount > 0)
+		if (PreviousContacts >= 2 && D.ContactCount == 0 && D.SupportedEdgeCount > 0)
 		{
-			++AbruptDrop;
+			const bool bDirect = Poly.Num() == 2
+				&& FMath::IsNearlyEqual(D.PathLength, StraightDist, 0.5);
+			TestTrue(TEXT("A multi-contact release publishes the clear direct path"), bDirect);
+			TestTrue(TEXT("A multi-contact release remains collision free and ready"),
+				D.bPathCollisionFree
+				&& (D.Status == ECableSimTautStatus::Ready
+					|| D.Status == ECableSimTautStatus::NoRelevantGeometry));
+			DirectReleaseCascadeCount += bDirect ? 1 : 0;
 		}
+		TestTrue(TEXT("Enabled continuation never publishes an over-length taut path"),
+			D.PathLength <= Cable->SimulationSettings.RestLength
+				+ Cable->TautSettings.LengthTolerance + 0.5);
 		AddInfo(FString::Printf(
 			TEXT("step %2d: status=%d contacts=%d edges=%d pathLen=%.1f straight=%.1f points=%d"),
 			Step, static_cast<int32>(D.Status), D.ContactCount, D.SupportedEdgeCount,
 			D.PathLength, StraightDist, Poly.Num()));
 		PreviousContacts = D.ContactCount;
 	}
-	AddInfo(FString::Printf(TEXT("max contacts reached during wind: %d  abruptDrops=%d"),
-		MaxContacts, AbruptDrop));
+	AddInfo(FString::Printf(TEXT("max contacts reached during wind: %d  directCascades=%d"),
+		MaxContacts, DirectReleaseCascadeCount));
 	TestTrue(TEXT("The rope wound around the box (multi-contact) at some point"), MaxContacts >= 2);
-	TestEqual(TEXT("The wrap never collapses across the box in a single step"), AbruptDrop, 0);
-	AddInfo(FString::Printf(TEXT("abrupt wrap drops (contacts>=1 -> 0 with edge present): %d"), AbruptDrop));
+	TestTrue(TEXT("The obsolete multi-contact wrap eventually releases to the direct path"),
+		DirectReleaseCascadeCount > 0);
 
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
@@ -953,6 +994,11 @@ bool FCableSimTautEnabledClampsReachTest::RunTest(const FString& Parameters)
 		EndpointDistance <= Cable->SimulationSettings.RestLength
 			+ Cable->TautSettings.LengthTolerance + 0.1);
 	TestTrue(TEXT("Enabled mode accepts most of the feasible request"), EndpointDistance > 99.0);
+	const FCableSimTautDiagnostics Diagnostics = Cable->GetTautDiagnostics();
+	TestTrue(TEXT("Enabled diagnostics report reach limiting"), Diagnostics.bReachLimited);
+	TestTrue(TEXT("Enabled diagnostics publish partial accepted progress"),
+		Diagnostics.AcceptedReachProgress > 0.0
+		&& Diagnostics.AcceptedReachProgress < 1.0);
 
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
@@ -1067,6 +1113,10 @@ bool FCableSimTautShadowDoesNotClampReachTest::RunTest(const FString& Parameters
 		FVector::Distance(Polyline[0], Polyline.Last()) > 149.0);
 	TestTrue(TEXT("Shadow mode still reports a valid collision-free taut path"),
 		Cable->GetTautDiagnostics().bPathCollisionFree);
+	TestFalse(TEXT("Shadow diagnostics do not report reach limiting"),
+		Cable->GetTautDiagnostics().bReachLimited);
+	TestTrue(TEXT("Shadow diagnostics publish full endpoint progress"),
+		FMath::IsNearlyEqual(Cable->GetTautDiagnostics().AcceptedReachProgress, 1.0));
 
 	Cable->DestroyComponent();
 	CableOwner->Destroy();
@@ -1167,6 +1217,71 @@ bool FCableSimMovingPlatformVelocityTest::RunTest(const FString& Parameters)
 		MaxContactVelocityX > Speed * 0.5);
 
 	CubeActor->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCableSimTautOwnershipLifecycleTest,
+	"CableSim.Runtime.Taut.OwnershipLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCableSimTautOwnershipLifecycleTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GIsEditor ? GWorld : (GEngine ? GEngine->GetWorldContexts()[0].World() : nullptr);
+	if (!TestNotNull(TEXT("Editor world is available"), World))
+	{
+		return false;
+	}
+
+	AActor* ExplicitOwner = World->SpawnActor<AActor>();
+	UCableSimComponent* ExplicitCable = NewObject<UCableSimComponent>(ExplicitOwner);
+	ExplicitCable->CollisionSettings.bEnableWorldCollision = false;
+	ExplicitCable->TautSettings.Mode = ECableSimTautMode::Shadow;
+	ExplicitCable->TautSettings.bAutoManageOwnershipFromEndpoints = false;
+	ExplicitCable->RegisterComponent();
+	ExplicitCable->ReinitializeSimulation();
+	TestFalse(TEXT("A configured taut mode can remain inactive"), ExplicitCable->IsTautEngaged());
+	TestEqual(TEXT("Inactive ownership is distinct from disabled"),
+		ExplicitCable->GetTautDiagnostics().Status, ECableSimTautStatus::Inactive);
+	ExplicitCable->EngageTautFromCable();
+	ExplicitCable->StepSimulation(1);
+	TestTrue(TEXT("Explicit engagement seeds from the current cable"), ExplicitCable->IsTautEngaged());
+	TestTrue(TEXT("Explicitly engaged shadow path is valid"),
+		ExplicitCable->GetTautDiagnostics().Status == ECableSimTautStatus::Ready
+		|| ExplicitCable->GetTautDiagnostics().Status == ECableSimTautStatus::NoRelevantGeometry);
+	ExplicitCable->DisengageTaut();
+	TestFalse(TEXT("Explicit disengagement returns ownership to the cable"),
+		ExplicitCable->IsTautEngaged());
+	TestEqual(TEXT("Disengagement clears the persistent taut path"),
+		ExplicitCable->GetTautPolyline().Num(), 0);
+
+	AActor* AutomaticOwner = World->SpawnActor<AActor>();
+	UCableSimComponent* AutomaticCable = NewObject<UCableSimComponent>(AutomaticOwner);
+	AutomaticCable->CollisionSettings.bEnableWorldCollision = false;
+	AutomaticCable->TautSettings.Mode = ECableSimTautMode::Shadow;
+	AutomaticCable->TautSettings.bAutoManageOwnershipFromEndpoints = true;
+	AutomaticCable->TautSettings.StartEndpoint.Role = ECableSimTautEndpointRole::Fixed;
+	AutomaticCable->TautSettings.EndEndpoint.Role = ECableSimTautEndpointRole::Free;
+	AutomaticCable->StartEndpoint.Mode = ECableSimEndpointMode::WorldKinematic;
+	AutomaticCable->EndEndpoint.Mode = ECableSimEndpointMode::Simulated;
+	AutomaticCable->RegisterComponent();
+	AutomaticCable->ReinitializeSimulation();
+	TestFalse(TEXT("A Fixed anchor alone does not claim taut ownership"),
+		AutomaticCable->IsTautEngaged());
+	AutomaticCable->SetEndpointWorldTarget(ECableSimEndpoint::End, FVector(150.0, 0.0, 0.0));
+	AutomaticCable->StepSimulation(1);
+	TestTrue(TEXT("Controlling a Driven endpoint engages taut ownership"),
+		AutomaticCable->IsTautEngaged());
+	AutomaticCable->ReleaseEndpoint(ECableSimEndpoint::End, true);
+	TestFalse(TEXT("Releasing the final Driven endpoint disengages taut ownership"),
+		AutomaticCable->IsTautEngaged());
+	TestEqual(TEXT("The released endpoint becomes Free"),
+		AutomaticCable->TautSettings.EndEndpoint.Role, ECableSimTautEndpointRole::Free);
+
+	ExplicitCable->DestroyComponent();
+	ExplicitOwner->Destroy();
+	AutomaticCable->DestroyComponent();
+	AutomaticOwner->Destroy();
 	return true;
 }
 

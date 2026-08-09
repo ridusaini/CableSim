@@ -27,6 +27,38 @@ namespace CableSim
 		VertexContact
 	};
 
+	enum class ETautPairCase : uint8
+	{
+		Indeterminate,
+		Inner,
+		Unstable,
+		Side,
+		Outer
+	};
+
+	enum class ETautPairAction : uint8
+	{
+		Singular,
+		StableInner,
+		MoveAlongA,
+		MoveAlongB,
+		ChooseAOrB,
+		IgnoreA,
+		IgnoreB,
+		OuterAThenB,
+		OuterBThenA
+	};
+
+	enum class ETautVertexResolution : uint8
+	{
+		StableHold,
+		SingularHold,
+		ConflictHold,
+		MoveAlong,
+		OuterSplit,
+		Release
+	};
+
 	/**
 	 * Non-owning, immutable topology supplied for one solve. Runtime owns the
 	 * backing snapshot. A complete admitted Box/Convex shape must be present;
@@ -59,22 +91,20 @@ namespace CableSim
 		double EdgeParameter = 0.0;
 
 		// Topology transitions are created at their old geometric position and
-		// moved by the normal swept collision phase.  A pending target is therefore
-		// state, not an immediate position assignment.  HistoryFeatureId0/1 retain
-		// the last valid local route for unstable/singular vertex classifications.
+		// moved by the normal swept collision phase. A pending target is therefore
+		// state, not an immediate position assignment.
 		FVector3d PendingTarget = FVector3d::ZeroVector;
 		bool bHasPendingTarget = false;
-		FCollisionFeatureId HistoryFeatureId0;
-		FCollisionFeatureId HistoryFeatureId1;
+		// Exact face-parallel predicates have two valid one-sided limits. Preserve
+		// only the selected side while geometry remains singular; never preserve a
+		// semantic Stable/Move/Ignore matrix action across frames.
+		int8 SingularOrientation = 0;
 	};
 
 	struct CABLESIMCORE_API FTautStepInput
 	{
 		FVector3d StartTarget = FVector3d::ZeroVector;
 		FVector3d EndTarget = FVector3d::ZeroVector;
-		// The visible dynamic rope is used only to break a history-free unstable
-		// topological tie.  It never globally rebuilds or shortens the taut path.
-		TArray<FVector3d> PreferredPolyline;
 	};
 
 	struct CABLESIMCORE_API FTautStepResult
@@ -87,21 +117,11 @@ namespace CableSim
 		int32 MovementIterationCount = 0;
 		int32 CollisionPhaseCount = 0;
 		int32 TopologyEventCount = 0;
+		// Outer-corner splits may subsequently merge or release within the same
+		// step, so the final contact count alone cannot describe this transition.
+		int32 OuterSplitCount = 0;
 		double PathLength = 0.0;
 		bool bPathCollisionFree = false;
-	};
-
-	enum class ETautPairAction : uint8
-	{
-		Singular,
-		StableInner,
-		MoveAlongA,
-		MoveAlongB,
-		ChooseAOrB,
-		IgnoreA,
-		IgnoreB,
-		OuterAThenB,
-		OuterBThenA
 	};
 
 	/** One-frame corner-classification record for tests and debugger overlays. */
@@ -110,7 +130,19 @@ namespace CableSim
 		FCollisionFeatureId VertexId;
 		FCollisionFeatureId EdgeA;
 		FCollisionFeatureId EdgeB;
+		ETautPairCase PairCase = ETautPairCase::Indeterminate;
 		ETautPairAction Action = ETautPairAction::Singular;
+		bool bUsedOneSidedLimit = false;
+		int8 SingularOrientation = 0;
+	};
+
+	struct CABLESIMCORE_API FTautVertexDecision
+	{
+		FCollisionFeatureId VertexId;
+		ETautVertexResolution Resolution = ETautVertexResolution::ConflictHold;
+		int32 ActiveEdgeCount = 0;
+		int32 IndeterminatePairCount = 0;
+		int32 OneSidedPairCount = 0;
 	};
 
 	struct CABLESIMCORE_API FTautStateSnapshot
@@ -144,10 +176,28 @@ namespace CableSim
 		const FTautStepResult& GetLastResult() const { return LastResult; }
 		const FTautReplayFrame& GetLastReplayFrame() const { return LastReplayFrame; }
 		const TArray<FTautPairDecision>& GetLastPairDecisions() const { return LastPairDecisions; }
+		const TArray<FTautVertexDecision>& GetLastVertexDecisions() const { return LastVertexDecisions; }
 		FTautStateSnapshot CaptureState() const;
 		bool RestoreState(const FTautStateSnapshot& Snapshot);
 
 	private:
+		enum class EEdgeMotionKind : uint8
+		{
+			Interior,
+			ReachStart,
+			ReachEnd,
+			Release,
+			Singular
+		};
+
+		struct FEdgeMotion
+		{
+			EEdgeMotionKind Kind = EEdgeMotionKind::Singular;
+			FVector3d Position = FVector3d::ZeroVector;
+			double Parameter = 0.0;
+			double UnclampedAxis = 0.0;
+		};
+
 		struct FSweepHit
 		{
 			TArray<int32, TInlineAllocator<8>> EdgeArrayIndices;
@@ -159,7 +209,10 @@ namespace CableSim
 		{
 			const FCollisionEdge* EdgeA = nullptr;
 			const FCollisionEdge* EdgeB = nullptr;
+			ETautPairCase PairCase = ETautPairCase::Indeterminate;
 			ETautPairAction Action = ETautPairAction::Singular;
+			bool bUsedOneSidedLimit = false;
+			int8 SingularOrientation = 0;
 		};
 
 		static bool IsFinite(const FVector3d& Value);
@@ -212,36 +265,20 @@ namespace CableSim
 			const FTautCollisionScene& Scene,
 			const FTautConfig& InConfig,
 			TArray<FTautPoint>& OutPoints);
-		static bool RequiresWrap(
+		static FEdgeMotion EvaluateEdgeMotion(
+			const FVector3d& RopeOrigin,
 			const FVector3d& Start,
 			const FVector3d& End,
 			const FCollisionEdge& Edge,
 			double Tolerance);
-		static bool CalculateContactPosition(
-			const FVector3d& Start,
-			const FVector3d& End,
-			const FCollisionEdge& Edge,
-			double Tolerance,
-			FVector3d& OutPosition,
-			double& OutParameter);
-		static bool CanReleaseEdgeContact(
-			const FVector3d& Previous,
-			const FVector3d& Contact,
-			const FVector3d& Next,
-			const FCollisionEdge& OwnEdge,
-			const FTautCollisionScene& Scene,
-			double DistanceTolerance,
-			double ParametricTolerance);
 		static FPairClassification ClassifyEdgePair(
+			const FVector3d& RopeOrigin,
 			const FVector3d& Previous,
 			const FVector3d& Next,
 			const FCollisionVertex& Vertex,
 			const FCollisionEdge& EdgeA,
 			const FCollisionEdge& EdgeB,
 			double Tolerance);
-		static double DistanceToPolyline(
-			const FVector3d& Position,
-			TConstArrayView<FVector3d> Polyline);
 		static double CalculatePathLength(TConstArrayView<FTautPoint> InPoints);
 		bool ValidateState(const FTautCollisionScene* Scene = nullptr) const;
 		void UpdateResult(
@@ -256,6 +293,8 @@ namespace CableSim
 		FTautStepResult LastResult;
 		FTautReplayFrame LastReplayFrame;
 		TArray<FTautPairDecision> LastPairDecisions;
+		TArray<FTautVertexDecision> LastVertexDecisions;
 		uint64 StepIndex = 0;
+		int32 CurrentOuterSplitCount = 0;
 	};
 }

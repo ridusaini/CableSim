@@ -53,6 +53,7 @@ UENUM(BlueprintType)
 enum class ECableSimTautStatus : uint8
 {
 	Disabled,
+	Inactive,
 	Uninitialized,
 	Ready,
 	NoRelevantGeometry,
@@ -225,10 +226,15 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable")
 	ECableSimTautMode Mode = ECableSimTautMode::Disabled;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	// Convenience ownership lifecycle: a controlled Driven endpoint engages taut;
+	// releasing the final Driven endpoint disengages it. Fixed anchors do not count.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode != ECableSimTautMode::Disabled"))
+	bool bAutoManageOwnershipFromEndpoints = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode != ECableSimTautMode::Disabled"))
 	FCableSimTautEndpointPolicy StartEndpoint;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (EditCondition = "Mode != ECableSimTautMode::Disabled"))
 	FCableSimTautEndpointPolicy EndEndpoint;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.001", Units = "cm"))
@@ -246,8 +252,13 @@ struct CABLESIMRUNTIME_API FCableSimTautSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", Units = "cm"))
 	double LengthTolerance = 0.1;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "24", EditCondition = "Mode == ECableSimTautMode::Enabled"))
-	int32 ReachBisectionIterations = 12;
+	// Ordered continuation finds the first infeasible interval instead of assuming
+	// reach acceptance is globally monotone across taut topology changes.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "2", ClampMax = "32", EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	int32 ReachContinuationSteps = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "1", ClampMax = "16", EditCondition = "Mode == ECableSimTautMode::Enabled"))
+	int32 ReachRefinementIterations = 8;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cable", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double GuideActivationPathRatio = 0.80;
@@ -378,6 +389,36 @@ struct CABLESIMRUNTIME_API FCableSimTautDiagnostics
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
 	int32 PairDecisionCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 VertexDecisionCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 StableVertexHoldCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 SingularVertexHoldCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 ConflictVertexHoldCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 VertexMoveAlongCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 VertexOuterSplitCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 VertexReleaseCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	int32 OneSidedPairCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut")
+	bool bReachLimited = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	double AcceptedReachProgress = 1.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Cable|Taut", meta = (Units = "cm"))
 	double PathLength = 0.0;
@@ -557,6 +598,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Cable|Simulation")
 	void ResetSimulation();
 
+	// Begin GDC-style taut ownership. The current dynamic cable polyline is consumed
+	// as the seed on the next fixed step, once collision topology is available.
+	UFUNCTION(BlueprintCallable, Category = "Cable|Taut")
+	void EngageTautFromCable();
+
+	// Return ownership to the dynamic cable without changing particles or velocities.
+	UFUNCTION(BlueprintCallable, Category = "Cable|Taut")
+	void DisengageTaut();
+
+	UFUNCTION(BlueprintPure, Category = "Cable|Taut")
+	bool IsTautEngaged() const;
+
 	UFUNCTION(BlueprintPure, Category = "Cable|Simulation")
 	TArray<FVector> GetSimulationPolyline() const;
 
@@ -588,6 +641,8 @@ private:
 		ECableSimEndpointBindingStatus& OutStatus) const;
 	void SynchronizeConfiguration();
 	void SynchronizeEndpointModes();
+	bool HasControlledDrivenEndpoint() const;
+	void ApplyAutomaticTautOwnershipTransition(bool bWasControlled, bool bIsControlled);
 	void SampleEndpointTargets(double DeltaTime);
 	CableSim::FStepInput BuildStepInput(double InterpolationAlpha) const;
 	void CommitEndpointSamples();
